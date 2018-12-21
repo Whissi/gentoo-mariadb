@@ -16,6 +16,7 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
+#if defined (HAVE_GCC_ATOMIC_BUILTINS)
 #define make_atomic_add_body(S)                     \
   v= __sync_fetch_and_add(a, v);
 #define make_atomic_fas_body(S)                     \
@@ -25,6 +26,20 @@
   int ## S cmp_val= *cmp;                           \
   sav= __sync_val_compare_and_swap(a, cmp_val, set);\
   if (!(ret= (sav == cmp_val))) *cmp= sav
+
+#elif defined(HAVE_GCC_C11_ATOMICS)
+
+#define make_atomic_add_body(S)                     \
+  v= __atomic_fetch_add(a, v, __ATOMIC_SEQ_CST)
+#define make_atomic_fas_body(S)                     \
+  v= __atomic_exchange_n(a, v, __ATOMIC_SEQ_CST)
+#define make_atomic_cas_body(S)                     \
+  int ## S sav;                                     \
+  ret= __atomic_compare_exchange_n(a, cmp, set,     \
+                                   0,               \
+                                   __ATOMIC_SEQ_CST,\
+                                   __ATOMIC_SEQ_CST);
+#endif
 
 #ifdef MY_ATOMIC_MODE_DUMMY
 #define make_atomic_load_body(S)   ret= *a
