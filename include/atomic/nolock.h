@@ -17,7 +17,7 @@
    Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1335  USA */
 
 #if defined(__i386__) || defined(_MSC_VER) || defined(__x86_64__)   \
-    || defined(HAVE_GCC_ATOMIC_BUILTINS) \
+    || defined(HAVE_GCC_ATOMIC_BUILTINS) || defined(HAVE_GCC_C11_ATOMICS) \
     || defined(HAVE_SOLARIS_ATOMIC)
 
 #  ifdef MY_ATOMIC_MODE_DUMMY
@@ -41,7 +41,7 @@
 #  elif __GNUC__
 #    if defined(HAVE_SOLARIS_ATOMIC)
 #      include "solaris.h"
-#    elif defined(HAVE_GCC_ATOMIC_BUILTINS)
+#    elif defined(HAVE_GCC_ATOMIC_BUILTINS) || defined(HAVE_GCC_C11_ATOMICS)
 #      include "gcc_builtins.h"
 #    elif defined(__i386__) || defined(__x86_64__)
 #      include "x86-gcc.h"
