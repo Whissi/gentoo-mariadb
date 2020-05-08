@@ -129,6 +129,8 @@ our $path_testlog;
 our $default_vardir;
 our $opt_vardir;                # Path to use for var/ dir
 our $plugindir;
+our $opt_xml_report;            # XML output
+
 my $path_vardir_trace;          # unix formatted opt_vardir for trace files
 my $opt_tmpdir;                 # Path to use for tmp/ dir
 my $opt_tmpdir_pid;
@@ -279,7 +281,7 @@ my $current_config_name; # The currently running config file template
 our @opt_experimentals;
 our $experimental_test_cases= [];
 
-my $baseport;
+our $baseport;
 # $opt_build_thread may later be set from $opt_port_base
 my $opt_build_thread= $ENV{'MTR_BUILD_THREAD'} || "auto";
 my $opt_port_base= $ENV{'MTR_PORT_BASE'} || "auto";
@@ -366,6 +368,32 @@ my $opt_stop_keep_alive= $ENV{MTR_STOP_KEEP_ALIVE};
 select(STDOUT);
 $| = 1; # Automatically flush STDOUT
 
+my $set_titlebar;
+
+
+ BEGIN {
+   if (IS_WINDOWS) {
+     my $have_win32_console= 0;
+     eval {
+       require Win32::Console;
+       Win32::Console->import();
+       $have_win32_console = 1;
+     };
+     eval 'sub HAVE_WIN32_CONSOLE { $have_win32_console }';
+   } else {
+     sub HAVE_WIN32_CONSOLE { 0 };
+   }
+}
+
+if (-t STDOUT) {
+  if (IS_WINDOWS and HAVE_WIN32_CONSOLE) {
+    $set_titlebar = sub {Win32::Console::Title $_[0];};
+  } elsif (defined $ENV{TERM} and $ENV{TERM} =~ /xterm/) {
+    $set_titlebar = sub { print "\e];$_[0]\a"; };
+  }
+}
+
+
 main();
 
 
@@ -441,11 +469,8 @@ sub main {
   if ( $opt_parallel eq "auto" ) {
     # Try to find a suitable value for number of workers
     my $sys_info= My::SysInfo->new();
+    $opt_parallel= $sys_info->num_cpus() + int($sys_info->min_bogomips()/500)-4;
 
-    $opt_parallel= $sys_info->num_cpus();
-    for my $limit (2000, 1500, 1000, 500){
-      $opt_parallel-- if ($sys_info->min_bogomips() < $limit);
-    }
     my $max_par= $ENV{MTR_MAX_PARALLEL} || 8;
     $opt_parallel= $max_par if ($opt_parallel > $max_par);
     $opt_parallel= $num_tests if ($opt_parallel > $num_tests);
@@ -566,7 +591,6 @@ sub main {
   }
 
   print_total_times($opt_parallel) if $opt_report_times;
-
   mtr_report_stats($prefix, $fail, $completed, $extra_warnings);
 
   if ( @$completed != $num_tests)
@@ -867,7 +891,7 @@ sub run_test_server ($$$) {
 	  delete $next->{reserved};
 	}
 
-        xterm_stat(scalar(@$tests));
+	titlebar_stat(scalar(@$tests)) if $set_titlebar;
 
 	if ($next) {
 	  # We don't need this any more
@@ -1062,6 +1086,7 @@ sub print_global_resfile {
   resfile_global("warnings", $opt_warnings ? 1 : 0);
   resfile_global("max-connections", $opt_max_connections);
   resfile_global("product", "MySQL");
+  resfile_global("xml-report", $opt_xml_report);
   # Somewhat hacky code to convert numeric version back to dot notation
   my $v1= int($mysql_version_id / 10000);
   my $v2= int(($mysql_version_id % 10000)/100);
@@ -1228,7 +1253,8 @@ sub command_line_setup {
              'help|h'                   => \$opt_usage,
 	     # list-options is internal, not listed in help
 	     'list-options'             => \$opt_list_options,
-             'skip-test-list=s'         => \@opt_skip_test_list
+             'skip-test-list=s'         => \@opt_skip_test_list,
+             'xml-report=s'             => \$opt_xml_report
            );
 
   # fix options (that take an optional argument and *only* after = sign
@@ -3167,7 +3193,8 @@ sub mysql_install_db {
   # ----------------------------------------------------------------------
   # export MYSQLD_BOOTSTRAP_CMD variable containing <path>/mysqld <args>
   # ----------------------------------------------------------------------
-  $ENV{'MYSQLD_BOOTSTRAP_CMD'}= "$exe_mysqld_bootstrap " . join(" ", @$args);
+  $ENV{'MYSQLD_BOOTSTRAP_CMD'}= "$exe_mysqld_bootstrap " . join(" ", @$args)
+    unless defined $ENV{'MYSQLD_BOOTSTRAP_CMD'};
 
   # Extra options can come not only from the command line, but also
   # from option files or combinations. We want them on a command line
@@ -3385,8 +3412,11 @@ sub do_before_run_mysqltest($)
     # to be able to distinguish them from manually created
     # version-controlled results, and to ignore them in git.
     my $dest = "$base_file$suites.result~";
-    my @cmd = ($exe_patch, qw/--binary -r - -f -s -o/,
-               $dest, $base_result, $resfile);
+    my @cmd = ($exe_patch);
+    if ($^O eq "MSWin32") {
+      push @cmd, '--binary';
+    }
+    push @cmd, (qw/-r - -f -s -o/, $dest, $base_result, $resfile);
     if (-w $resdir) {
       # don't rebuild a file if it's up to date
       unless (-e $dest and -M $dest < -M $resfile
@@ -6284,6 +6314,7 @@ Misc options
                         phases of test execution.
   stress=ARGS           Run stress test, providing options to
                         mysql-stress-test.pl. Options are separated by comma.
+  xml-report=<file>     Output jUnit xml file of the results.
 
 Some options that control enabling a feature for normal test runs,
 can be turned off by prepending 'no' to the option, e.g. --notimer.
@@ -6312,19 +6343,16 @@ sub time_format($) {
 
 our $num_tests;
 
-sub xterm_stat {
-  if (-t STDOUT and defined $ENV{TERM} and $ENV{TERM} =~ /xterm/) {
-    my ($left) = @_;
+sub titlebar_stat {
+  my ($left) = @_;
 
-    # 2.5 -> best by test
-    $num_tests = $left + 2.5 unless $num_tests;
+  # 2.5 -> best by test
+  $num_tests = $left + 2.5 unless $num_tests;
 
-    my $done = $num_tests - $left;
-    my $spent = time - $^T;
+  my $done = $num_tests - $left;
+  my $spent = time - $^T;
 
-    syswrite STDOUT, sprintf
-           "\e];mtr: spent %s on %d tests. %s (%d tests) left\a",
+  &$set_titlebar(sprintf "mtr: spent %s on %d tests. %s (%d tests) left",
            time_format($spent), $done,
-           time_format($spent/$done * $left), $left;
-  }
+           time_format($spent/$done * $left), $left);
 }

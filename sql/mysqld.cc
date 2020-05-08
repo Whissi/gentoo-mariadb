@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2018, MariaDB
+   Copyright (c) 2008, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -5772,8 +5772,10 @@ int mysqld_main(int argc, char **argv)
       set_user(mysqld_user, user_info);
   }
 
+#ifdef WITH_WSREP
   if (WSREP_ON && wsrep_check_opts())
     global_system_variables.wsrep_on= 0;
+#endif
 
   if (opt_bin_log && !global_system_variables.server_id)
   {
@@ -8415,9 +8417,9 @@ SHOW_VAR status_vars[]= {
   {"Key",                      (char*) &show_default_keycache, SHOW_FUNC},
   {"Last_query_cost",          (char*) offsetof(STATUS_VAR, last_query_cost), SHOW_DOUBLE_STATUS},
   {"Max_statement_time_exceeded", (char*) offsetof(STATUS_VAR, max_statement_time_exceeded), SHOW_LONG_STATUS},
-  {"Master_gtid_wait_count",   (char*) offsetof(STATUS_VAR, master_gtid_wait_count), SHOW_LONGLONG_STATUS},
-  {"Master_gtid_wait_timeouts", (char*) offsetof(STATUS_VAR, master_gtid_wait_timeouts), SHOW_LONGLONG_STATUS},
-  {"Master_gtid_wait_time",    (char*) offsetof(STATUS_VAR, master_gtid_wait_time), SHOW_LONGLONG_STATUS},
+  {"Master_gtid_wait_count",   (char*) offsetof(STATUS_VAR, master_gtid_wait_count), SHOW_LONG_STATUS},
+  {"Master_gtid_wait_timeouts", (char*) offsetof(STATUS_VAR, master_gtid_wait_timeouts), SHOW_LONG_STATUS},
+  {"Master_gtid_wait_time",    (char*) offsetof(STATUS_VAR, master_gtid_wait_time), SHOW_LONG_STATUS},
   {"Max_used_connections",     (char*) &max_used_connections,  SHOW_LONG},
   {"Memory_used",              (char*) &show_memory_used, SHOW_SIMPLE_FUNC},
   {"Not_flushed_delayed_rows", (char*) &delayed_rows_in_use,    SHOW_LONG_NOFLUSH},
