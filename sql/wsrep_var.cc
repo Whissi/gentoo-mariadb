@@ -41,6 +41,59 @@ int wsrep_init_vars()
   return 0;
 }
 
+static int get_provider_option_value(const char* opts,
+                                     const char* opt_name,
+                                     ulong* opt_value)
+{
+  int ret= 1;
+  ulong opt_value_tmp;
+  char *opt_value_str, *s, *opts_copy= my_strdup(opts, MYF(MY_WME));
+
+  if ((opt_value_str= strstr(opts_copy, opt_name)) == NULL)
+    goto end;
+  opt_value_str= strtok_r(opt_value_str, "=", &s);
+  if (opt_value_str == NULL) goto end;
+  opt_value_str= strtok_r(NULL, ";", &s);
+  if (opt_value_str == NULL) goto end;
+
+  opt_value_tmp= strtoul(opt_value_str, NULL, 10);
+  if (errno == ERANGE) goto end;
+
+  *opt_value= opt_value_tmp;
+  ret= 0;
+
+end:
+  my_free(opts_copy);
+  return ret;
+}
+
+static bool refresh_provider_options()
+{
+  WSREP_DEBUG("refresh_provider_options: %s",
+              (wsrep_provider_options) ? wsrep_provider_options : "null");
+
+  try
+  {
+    std::string opts= Wsrep_server_state::instance().provider().options();
+    wsrep_provider_options_init(opts.c_str());
+    get_provider_option_value(wsrep_provider_options,
+                              (char*)"repl.max_ws_size",
+                              &wsrep_max_ws_size);
+    return false;
+  }
+  catch (...)
+  {
+    WSREP_ERROR("Failed to get provider options");
+    return true;
+  }
+}
+
+static void wsrep_set_wsrep_on()
+{
+  WSREP_ON_= global_system_variables.wsrep_on && wsrep_provider &&
+    strcmp(wsrep_provider, WSREP_NONE);
+}
+
 /* This is intentionally declared as a weak global symbol, so that
 linking will succeed even if the server is built with a dynamically
 linked InnoDB. */
@@ -50,9 +103,32 @@ struct handlerton* innodb_hton_ptr __attribute__((weak));
 bool wsrep_on_update (sys_var *self, THD* thd, enum_var_type var_type)
 {
   if (var_type == OPT_GLOBAL) {
-    // FIXME: this variable probably should be changed only per session
+    my_bool saved_wsrep_on= global_system_variables.wsrep_on;
+
     thd->variables.wsrep_on= global_system_variables.wsrep_on;
+
+    // If wsrep has not been inited we need to do it now
+    if (global_system_variables.wsrep_on && wsrep_provider && !wsrep_inited)
+    {
+      char* tmp= strdup(wsrep_provider); // wsrep_init() rewrites provider
+                                         //when fails
+
+      mysql_mutex_unlock(&LOCK_global_system_variables);
+
+      if (wsrep_init())
+      {
+        my_error(ER_CANT_OPEN_LIBRARY, MYF(0), tmp, my_error, "wsrep_init failed");
+        //rcode= true;
+      }
+
+      free(tmp);
+      mysql_mutex_lock(&LOCK_global_system_variables);
+    }
+
+    thd->variables.wsrep_on= global_system_variables.wsrep_on= saved_wsrep_on;
   }
+
+  wsrep_set_wsrep_on();
 
   return false;
 }
@@ -224,53 +300,6 @@ bool wsrep_start_position_init (const char* val)
   return false;
 }
 
-static int get_provider_option_value(const char* opts,
-                                     const char* opt_name,
-                                     ulong* opt_value)
-{
-  int ret= 1;
-  ulong opt_value_tmp;
-  char *opt_value_str, *s, *opts_copy= my_strdup(opts, MYF(MY_WME));
-
-  if ((opt_value_str= strstr(opts_copy, opt_name)) == NULL)
-    goto end;
-  opt_value_str= strtok_r(opt_value_str, "=", &s);
-  if (opt_value_str == NULL) goto end;
-  opt_value_str= strtok_r(NULL, ";", &s);
-  if (opt_value_str == NULL) goto end;
-
-  opt_value_tmp= strtoul(opt_value_str, NULL, 10);
-  if (errno == ERANGE) goto end;
-
-  *opt_value= opt_value_tmp;
-  ret= 0;
-
-end:
-  my_free(opts_copy);
-  return ret;
-}
-
-static bool refresh_provider_options()
-{
-  WSREP_DEBUG("refresh_provider_options: %s", 
-              (wsrep_provider_options) ? wsrep_provider_options : "null");
-
-  try
-  {
-    std::string opts= Wsrep_server_state::instance().provider().options();
-    wsrep_provider_options_init(opts.c_str());
-    get_provider_option_value(wsrep_provider_options,
-                              (char*)"repl.max_ws_size",
-                              &wsrep_max_ws_size);
-    return false;
-  }
-  catch (...)
-  {
-    WSREP_ERROR("Failed to get provider options");
-    return true;
-  }
-}
-
 static int wsrep_provider_verify (const char* provider_str)
 {
   MY_STAT   f_stat;
@@ -322,11 +351,11 @@ bool wsrep_provider_update (sys_var *self, THD* thd, enum_var_type type)
 
   WSREP_DEBUG("wsrep_provider_update: %s", wsrep_provider);
 
-  /* stop replication is heavy operation, and includes closing all client 
+  /* stop replication is heavy operation, and includes closing all client
      connections. Closing clients may need to get LOCK_global_system_variables
      at least in MariaDB.
 
-     Note: releasing LOCK_global_system_variables may cause race condition, if 
+     Note: releasing LOCK_global_system_variables may cause race condition, if
      there can be several concurrent clients changing wsrep_provider
   */
   mysql_mutex_unlock(&LOCK_global_system_variables);
@@ -357,6 +386,7 @@ bool wsrep_provider_update (sys_var *self, THD* thd, enum_var_type type)
   if (!rcode)
     refresh_provider_options();
 
+  wsrep_set_wsrep_on();
   mysql_mutex_lock(&LOCK_global_system_variables);
 
   return rcode;
@@ -376,6 +406,7 @@ void wsrep_provider_init (const char* value)
 
   if (wsrep_provider) my_free((void *)wsrep_provider);
   wsrep_provider= my_strdup(value, MYF(0));
+  wsrep_set_wsrep_on();
 }
 
 bool wsrep_provider_options_check(sys_var *self, THD* thd, set_var* var)
@@ -854,6 +885,8 @@ static void export_wsrep_status_to_mysql(THD* thd)
 
 int wsrep_show_status (THD *thd, SHOW_VAR *var, char *buff)
 {
+  /* Note that we should allow show status like 'wsrep%' even
+  when WSREP(thd) is false. */
   if (WSREP_ON)
   {
     export_wsrep_status_to_mysql(thd);

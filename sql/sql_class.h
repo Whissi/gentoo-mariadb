@@ -873,9 +873,9 @@ typedef struct system_status_var
   ulong feature_window_functions;   /* +1 when window functions are used */
 
   /* From MASTER_GTID_WAIT usage */
-  ulonglong master_gtid_wait_timeouts;          /* Number of timeouts */
-  ulonglong master_gtid_wait_time;              /* Time in microseconds */
-  ulonglong master_gtid_wait_count;
+  ulong master_gtid_wait_timeouts;          /* Number of timeouts */
+  ulong master_gtid_wait_time;              /* Time in microseconds */
+  ulong master_gtid_wait_count;
 
   ulong empty_queries;
   ulong access_denied_errors;
@@ -3274,7 +3274,10 @@ public:
   void reset_for_reuse();
   bool store_globals();
   void reset_globals();
-  bool trace_started();
+  bool trace_started()
+  {
+    return opt_trace.is_started();
+  }
 #ifdef SIGNAL_WITH_VIO_CLOSE
   inline void set_active_vio(Vio* vio)
   {
@@ -3293,7 +3296,7 @@ public:
   void awake_no_mutex(killed_state state_to_set);
   void awake(killed_state state_to_set)
   {
-    bool wsrep_on_local= WSREP_ON;
+    bool wsrep_on_local= WSREP_NNULL(this);
     /*
       mutex locking order (LOCK_thd_data - LOCK_thd_kill)) requires
       to grab LOCK_thd_data here
@@ -5003,6 +5006,7 @@ public:
   Item *sp_fix_func_item(Item **it_addr);
   Item *sp_prepare_func_item(Item **it_addr, uint cols= 1);
   bool sp_eval_expr(Field *result_field, Item **expr_item_ptr);
+
 };
 
 /** A short cut for thd->get_stmt_da()->set_ok_status(). */

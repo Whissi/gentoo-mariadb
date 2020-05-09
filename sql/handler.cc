@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB Corporation.
+   Copyright (c) 2009, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -440,9 +440,9 @@ static int ha_finish_errors(void)
   return 0;
 }
 
-static volatile int32 need_full_discover_for_existence= 0;
-static volatile int32 engines_with_discover_file_names= 0;
-static volatile int32 engines_with_discover= 0;
+static Atomic_counter<int32> need_full_discover_for_existence(0);
+static Atomic_counter<int32> engines_with_discover_file_names(0);
+static Atomic_counter<int32> engines_with_discover(0);
 
 static int full_discover_for_existence(handlerton *, const char *, const char *)
 { return 0; }
@@ -464,13 +464,13 @@ static int hton_ext_based_table_discovery(handlerton *hton, LEX_CSTRING *db,
 static void update_discovery_counters(handlerton *hton, int val)
 {
   if (hton->discover_table_existence == full_discover_for_existence)
-    my_atomic_add32(&need_full_discover_for_existence,  val);
+    need_full_discover_for_existence+= val;
 
   if (hton->discover_table_names && hton->tablefile_extensions[0])
-    my_atomic_add32(&engines_with_discover_file_names, val);
+    engines_with_discover_file_names+= val;
 
   if (hton->discover_table)
-    my_atomic_add32(&engines_with_discover, val);
+    engines_with_discover+= val;
 }
 
 int ha_finalize_handlerton(st_plugin_int *plugin)
@@ -1705,7 +1705,8 @@ end:
     thd->mdl_context.release_lock(mdl_request.ticket);
   }
 #ifdef WITH_WSREP
-  if (wsrep_is_active(thd) && is_real_trans && !error && (rw_ha_count == 0) &&
+  if (wsrep_is_active(thd) && is_real_trans && !error &&
+      (rw_ha_count == 0 || all) &&
       wsrep_not_committed(thd))
   {
     wsrep_commit_empty(thd, all);
@@ -1994,29 +1995,33 @@ int ha_commit_or_rollback_by_xid(XID *xid, bool commit)
 
 
 #ifndef DBUG_OFF
-/**
-  @note
-    This does not need to be multi-byte safe or anything
-*/
-static char* xid_to_str(char *buf, XID *xid)
+/** Converts XID to string.
+
+@param[out] buf output buffer
+@param[in] xid XID to convert
+
+@return pointer to converted string
+
+@note This does not need to be multi-byte safe or anything */
+char *xid_to_str(char *buf, const XID &xid)
 {
   int i;
   char *s=buf;
   *s++='\'';
-  for (i=0; i < xid->gtrid_length+xid->bqual_length; i++)
+  for (i= 0; i < xid.gtrid_length + xid.bqual_length; i++)
   {
-    uchar c=(uchar)xid->data[i];
+    uchar c= (uchar) xid.data[i];
     /* is_next_dig is set if next character is a number */
     bool is_next_dig= FALSE;
     if (i < XIDDATASIZE)
     {
-      char ch= xid->data[i+1];
+      char ch= xid.data[i + 1];
       is_next_dig= (ch >= '0' && ch <='9');
     }
-    if (i == xid->gtrid_length)
+    if (i == xid.gtrid_length)
     {
       *s++='\'';
-      if (xid->bqual_length)
+      if (xid.bqual_length)
       {
         *s++='.';
         *s++='\'';
@@ -2126,6 +2131,11 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
          the prepare.
       */
       my_xid wsrep_limit __attribute__((unused))= 0;
+
+      /* Note that we could call this for binlog also that
+         will not have WSREP(thd) but global wsrep on might
+         be true.
+      */
       if (WSREP_ON)
         wsrep_limit= wsrep_order_and_check_continuity(info->list, got);
 
@@ -2139,7 +2149,7 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
         {
           DBUG_EXECUTE("info",{
             char buf[XIDDATASIZE*4+6];
-            _db_doprnt_("ignore xid %s", xid_to_str(buf, info->list+i));
+            _db_doprnt_("ignore xid %s", xid_to_str(buf, info->list[i]));
             });
           xid_cache_insert(info->list + i);
           info->found_foreign_xids++;
@@ -2166,7 +2176,7 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
           {
             DBUG_EXECUTE("info",{
               char buf[XIDDATASIZE*4+6];
-              _db_doprnt_("commit xid %s", xid_to_str(buf, info->list+i));
+              _db_doprnt_("commit xid %s", xid_to_str(buf, info->list[i]));
               });
           }
         }
@@ -2177,7 +2187,7 @@ static my_bool xarecover_handlerton(THD *unused, plugin_ref plugin,
           {
             DBUG_EXECUTE("info",{
               char buf[XIDDATASIZE*4+6];
-              _db_doprnt_("rollback xid %s", xid_to_str(buf, info->list+i));
+              _db_doprnt_("rollback xid %s", xid_to_str(buf, info->list[i]));
               });
           }
         }
@@ -2675,11 +2685,13 @@ double handler::keyread_time(uint index, uint ranges, ha_rows rows)
   size_t len= table->key_info[index].key_length + ref_length;
   if (index == table->s->primary_key && table->file->primary_key_is_clustered())
     len= table->s->stored_rec_length;
-  uint keys_per_block= (uint) (stats.block_size/2.0/len+1);
-  ulonglong blocks= !rows ? 0 : (rows-1) / keys_per_block + 1;
   double cost= (double)rows*len/(stats.block_size+1)*IDX_BLOCK_COPY_COST;
   if (ranges)
+  {
+    uint keys_per_block= (uint) (stats.block_size/2.0/len+1);
+    ulonglong blocks= !rows ? 0 : (rows-1) / keys_per_block + 1;
     cost+= blocks;
+  }
   return cost;
 }
 
@@ -4635,7 +4647,7 @@ Alter_inplace_info::Alter_inplace_info(HA_CREATE_INFO *create_info_arg,
                      Alter_info *alter_info_arg,
                      KEY *key_info_arg, uint key_count_arg,
                      partition_info *modified_part_info_arg,
-                     bool ignore_arg)
+                     bool ignore_arg, bool error_non_empty)
     : create_info(create_info_arg),
     alter_info(alter_info_arg),
     key_info_buffer(key_info_arg),
@@ -4651,7 +4663,8 @@ Alter_inplace_info::Alter_inplace_info(HA_CREATE_INFO *create_info_arg,
     modified_part_info(modified_part_info_arg),
     ignore(ignore_arg),
     online(false),
-    unsupported_reason(nullptr)
+    unsupported_reason(nullptr),
+    error_if_not_empty(error_non_empty)
   {}
 
 void Alter_inplace_info::report_unsupported_error(const char *not_supported,
@@ -5957,22 +5970,22 @@ int handler::compare_key2(key_range *range) const
 /**
   ICP callback - to be called by an engine to check the pushed condition
 */
-extern "C" enum icp_result handler_index_cond_check(void* h_arg)
+extern "C" check_result_t handler_index_cond_check(void* h_arg)
 {
   handler *h= (handler*)h_arg;
   THD *thd= h->table->in_use;
-  enum icp_result res;
+  check_result_t res;
 
   enum thd_kill_levels abort_at= h->has_transactions() ?
     THD_ABORT_SOFTLY : THD_ABORT_ASAP;
   if (thd_kill_level(thd) > abort_at)
-    return ICP_ABORTED_BY_USER;
+    return CHECK_ABORTED_BY_USER;
 
   if (h->end_range && h->compare_key2(h->end_range) > 0)
-    return ICP_OUT_OF_RANGE;
+    return CHECK_OUT_OF_RANGE;
   h->increment_statistics(&SSV::ha_icp_attempts);
-  if ((res= h->pushed_idx_cond->val_int()? ICP_MATCH : ICP_NO_MATCH) ==
-      ICP_MATCH)
+  if ((res= h->pushed_idx_cond->val_int()? CHECK_POS : CHECK_NEG) ==
+      CHECK_POS)
     h->increment_statistics(&SSV::ha_icp_match);
   return res;
 }
@@ -5983,12 +5996,30 @@ extern "C" enum icp_result handler_index_cond_check(void* h_arg)
   keys of the rows whose data is to be fetched against the used rowid filter
 */
 
-extern "C" int handler_rowid_filter_check(void *h_arg)
+extern "C"
+check_result_t handler_rowid_filter_check(void *h_arg)
 {
   handler *h= (handler*) h_arg;
   TABLE *tab= h->get_table();
+
+  /*
+    Check for out-of-range and killed conditions only if we haven't done it
+    already in the pushed index condition check
+  */
+  if (!h->pushed_idx_cond)
+  {
+    THD *thd= h->table->in_use;
+    enum thd_kill_levels abort_at= h->has_transactions() ?
+      THD_ABORT_SOFTLY : THD_ABORT_ASAP;
+    if (thd_kill_level(thd) > abort_at)
+      return CHECK_ABORTED_BY_USER;
+
+    if (h->end_range && h->compare_key2(h->end_range) > 0)
+      return CHECK_OUT_OF_RANGE;
+  }
+
   h->position(tab->record[0]);
-  return h->pushed_rowid_filter->check((char *) h->ref);
+  return h->pushed_rowid_filter->check((char*)h->ref)? CHECK_POS: CHECK_NEG;
 }
 
 
@@ -6951,6 +6982,20 @@ void signal_log_not_needed(struct handlerton, char *log_file)
 void handler::set_lock_type(enum thr_lock_type lock)
 {
   table->reginfo.lock_type= lock;
+}
+
+Compare_keys handler::compare_key_parts(const Field &old_field,
+                                        const Column_definition &new_field,
+                                        const KEY_PART_INFO &old_part,
+                                        const KEY_PART_INFO &new_part) const
+{
+  if (!old_field.is_equal(new_field))
+    return Compare_keys::NotEqual;
+
+  if (old_part.length != new_part.length)
+    return Compare_keys::NotEqual;
+
+  return Compare_keys::Equal;
 }
 
 #ifdef WITH_WSREP

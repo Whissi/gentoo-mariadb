@@ -153,6 +153,8 @@ bool reload_acl_and_cache(THD *thd, unsigned long long options,
       if (mysql_bin_log.rotate_and_purge(true, drop_gtid_domain))
         *write_to_binlog= -1;
 
+      /* Note that WSREP(thd) might not be true here e.g. during
+      SST. */
       if (WSREP_ON)
       {
         /* Wait for last binlog checkpoint event to be logged. */
@@ -523,6 +525,12 @@ bool flush_tables_with_read_lock(THD *thd, TABLE_LIST *all_tables)
   {
     my_error(ER_LOCK_OR_ACTIVE_TRANSACTION, MYF(0));
     goto error;
+  }
+
+  if (thd->current_backup_stage != BACKUP_FINISHED)
+  {
+    my_error(ER_BACKUP_LOCK_IS_ACTIVE, MYF(0));
+    return true;
   }
 
   if (thd->lex->type & REFRESH_READ_LOCK)

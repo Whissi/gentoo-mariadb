@@ -2,7 +2,7 @@
 # -*- cperl -*-
 
 # Copyright (c) 2004, 2014, Oracle and/or its affiliates.
-# Copyright (c) 2009, 2018, MariaDB Corporation
+# Copyright (c) 2009, 2020, MariaDB Corporation
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -129,6 +129,8 @@ our $path_testlog;
 our $default_vardir;
 our $opt_vardir;                # Path to use for var/ dir
 our $plugindir;
+our $opt_xml_report;            # XML output
+
 my $path_vardir_trace;          # unix formatted opt_vardir for trace files
 my $opt_tmpdir;                 # Path to use for tmp/ dir
 my $opt_tmpdir_pid;
@@ -138,10 +140,6 @@ my $opt_start_dirty;
 my $opt_start_exit;
 my $start_only;
 my $file_wsrep_provider;
-my $extra_path;
-my $mariabackup_path;
-my $mariabackup_exe;
-my $garbd_exe;
 
 our @global_suppressions;
 
@@ -375,171 +373,33 @@ my $opt_stop_keep_alive= $ENV{MTR_STOP_KEEP_ALIVE};
 select(STDOUT);
 $| = 1; # Automatically flush STDOUT
 
+my $set_titlebar;
+
+
+ BEGIN {
+   if (IS_WINDOWS) {
+     my $have_win32_console= 0;
+     eval {
+       require Win32::Console;
+       Win32::Console->import();
+       $have_win32_console = 1;
+     };
+     eval 'sub HAVE_WIN32_CONSOLE { $have_win32_console }';
+   } else {
+     sub HAVE_WIN32_CONSOLE { 0 };
+   }
+}
+
+if (-t STDOUT) {
+  if (IS_WINDOWS and HAVE_WIN32_CONSOLE) {
+    $set_titlebar = sub {Win32::Console::Title $_[0];};
+  } elsif (defined $ENV{TERM} and $ENV{TERM} =~ /xterm/) {
+    $set_titlebar = sub { print "\e];$_[0]\a"; };
+  }
+}
+
+
 main();
-
-sub have_wsrep() {
-  my $wsrep_on= $mysqld_variables{'wsrep-on'};
-  return defined $wsrep_on
-}
-
-sub have_wsrep_provider() {
-  return $file_wsrep_provider ne "";
-}
-
-sub have_mariabackup() {
-  return $mariabackup_path ne "";
-}
-
-sub have_garbd() {
-  return $garbd_exe ne "";
-}
-
-sub check_wsrep_version() {
-  if ($My::SafeProcess::wsrep_check_version ne "") {
-    system($My::SafeProcess::wsrep_check_version);
-    return ($? >> 8) == 0;
-  }
-  else {
-    return 0;
-  }
-}
-
-sub wsrep_version_message() {
-  if ($My::SafeProcess::wsrep_check_version ne "") {
-     my $output= `$My::SafeProcess::wsrep_check_version -p`;
-     if (($? >> 8) == 0) {
-        $output =~ s/\s+\z//;
-        return "Wsrep provider version mismatch (".$output.")";
-     }
-     else {
-        return "Galera library does not contain a version symbol";
-     }
-  }
-  else {
-     return "Unable to find a wsrep version check utility";
-  }
-}
-
-sub which($) { return `sh -c "command -v $_[0]"` }
-
-sub check_garbd_support() {
-  if (defined $ENV{'MTR_GARBD_EXE'}) {
-    if (mtr_file_exists($ENV{'MTR_GARBD_EXE'}) ne "") {
-      $garbd_exe= $ENV{'MTR_GARBD_EXE'};
-    } else {
-      mtr_error("MTR_GARBD_EXE env set to an invalid path");
-    }
-  }
-  else {
-    my $wsrep_path= dirname($file_wsrep_provider);
-    $garbd_exe=
-      mtr_file_exists($wsrep_path."/garb/garbd",
-                      $wsrep_path."/../../bin/garb/garbd");
-    if ($garbd_exe ne "") {
-      $ENV{MTR_GARBD_EXE}= $garbd_exe;
-    }
-  }
-}
-
-sub check_wsrep_support() {
-  $garbd_exe= "";
-  if (have_wsrep()) {
-    mtr_report(" - binaries built with wsrep patch");
-
-    # ADD scripts to $PATH to that wsrep_sst_* can be found
-    my ($spath) = grep { -f "$_/wsrep_sst_rsync"; } "$bindir/scripts", $path_client_bindir;
-    mtr_error("No SST scripts") unless $spath;
-    my $separator= (IS_WINDOWS) ? ';' : ':';
-    $ENV{PATH}="$spath$separator$ENV{PATH}";
-
-    # ADD mysql client library path to path so that wsrep_notify_cmd can find mysql
-    # client for loading the tables. (Don't assume each machine has mysql install)
-    my ($cpath) = grep { -f "$_/mysql"; } "$bindir/scripts", $path_client_bindir;
-    mtr_error("No scritps") unless $cpath;
-    $ENV{PATH}="$cpath$separator$ENV{PATH}" unless $cpath eq $spath;
-
-    # ADD my_print_defaults script path to path so that SST scripts can find it
-    my $my_print_defaults_exe=
-      mtr_exe_maybe_exists(
-        "$bindir/extra/my_print_defaults",
-        "$path_client_bindir/my_print_defaults");
-    my $epath= "";
-    if ($my_print_defaults_exe ne "") {
-       $epath= dirname($my_print_defaults_exe);
-    }
-    mtr_error("No my_print_defaults") unless $epath;
-    $ENV{PATH}="$epath$separator$ENV{PATH}" unless ($epath eq $spath) or
-                                                   ($epath eq $cpath);
-
-    $extra_path= $epath;
-
-    if (!IS_WINDOWS) {
-      if (which("socat")) {
-        $ENV{MTR_GALERA_TFMT}="socat";
-      } elsif (which("nc")) {
-        $ENV{MTR_GALERA_TFMT}="nc";
-      }
-    }
-
-    # Check whether WSREP_PROVIDER environment variable is set.
-    if (defined $ENV{'WSREP_PROVIDER'}) {
-      $file_wsrep_provider= "";
-      if ($ENV{'WSREP_PROVIDER'} ne "none") {
-        if (mtr_file_exists($ENV{'WSREP_PROVIDER'}) ne "") {
-          $file_wsrep_provider= $ENV{'WSREP_PROVIDER'};
-        } else {
-          mtr_error("WSREP_PROVIDER env set to an invalid path");
-        }
-        check_garbd_support();
-      }
-      # WSREP_PROVIDER is valid; set to a valid path or "none").
-      mtr_verbose("WSREP_PROVIDER env set to $ENV{'WSREP_PROVIDER'}");
-    } else {
-      # WSREP_PROVIDER env not defined. Lets try to locate the wsrep provider
-      # library.
-      $file_wsrep_provider=
-        mtr_file_exists("/usr/lib64/galera-4/libgalera_smm.so",
-                        "/usr/lib64/galera/libgalera_smm.so",
-                        "/usr/lib/galera-4/libgalera_smm.so",
-                        "/usr/lib/galera/libgalera_smm.so");
-      if ($file_wsrep_provider ne "") {
-        # wsrep provider library found !
-        mtr_verbose("wsrep provider library found : $file_wsrep_provider");
-        $ENV{'WSREP_PROVIDER'}= $file_wsrep_provider;
-        check_garbd_support();
-      } else {
-        mtr_verbose("Could not find wsrep provider library, setting it to 'none'");
-        $ENV{'WSREP_PROVIDER'}= "none";
-      }
-    }
-  } else {
-    $file_wsrep_provider= "";
-    $extra_path= "";
-  }
-}
-
-sub check_mariabackup_support() {
-  $mariabackup_path= "";
-  $mariabackup_exe=
-    mtr_exe_maybe_exists(
-      "$bindir/extra/mariabackup$opt_vs_config/mariabackup",
-      "$path_client_bindir/mariabackup");
-  if ($mariabackup_exe ne "") {
-    my $bpath= dirname($mariabackup_exe);
-    my $separator= (IS_WINDOWS) ? ';' : ':';
-    $ENV{PATH}="$bpath$separator$ENV{PATH}" unless $bpath eq $extra_path;
-
-    $mariabackup_path= $bpath;
-
-    $ENV{XTRABACKUP}= $mariabackup_exe;
-
-    $ENV{XBSTREAM}= mtr_exe_maybe_exists(
-      "$bindir/extra/mariabackup/$opt_vs_config/mbstream",
-      "$path_client_bindir/mbstream");
-
-    $ENV{INNOBACKUPEX}= "$mariabackup_exe --innobackupex";
-  }
-}
 
 sub main {
   $ENV{MTR_PERL}=$^X;
@@ -585,8 +445,7 @@ sub main {
   }
   check_ssl_support();
   check_debug_support();
-  check_wsrep_support();
-  check_mariabackup_support();
+  environment_setup();
 
   if (!$opt_suites) {
     $opt_suites= join ',', collect_default_suites(@DEFAULT_SUITES);
@@ -622,10 +481,7 @@ sub main {
     else
     {
       my $sys_info= My::SysInfo->new();
-      $opt_parallel= $sys_info->num_cpus();
-      for my $limit (2000, 1500, 1000, 500){
-        $opt_parallel-- if ($sys_info->min_bogomips() < $limit);
-      }
+      $opt_parallel= $sys_info->num_cpus()+int($sys_info->min_bogomips()/500)-4;
     }
     my $max_par= $ENV{MTR_MAX_PARALLEL} || 8;
     $opt_parallel= $max_par if ($opt_parallel > $max_par);
@@ -741,7 +597,6 @@ sub main {
   mtr_print_line();
 
   print_total_times($opt_parallel) if $opt_report_times;
-
   mtr_report_stats($prefix, $fail, $completed, $extra_warnings);
 
   if ($opt_gcov) {
@@ -1049,7 +904,7 @@ sub run_test_server ($$$) {
 	  delete $next->{reserved};
 	}
 
-        xterm_stat(scalar(@$tests));
+	titlebar_stat(scalar(@$tests)) if $set_titlebar;
 
 	if ($next) {
 	  # We don't need this any more
@@ -1244,6 +1099,7 @@ sub print_global_resfile {
   resfile_global("warnings", $opt_warnings ? 1 : 0);
   resfile_global("max-connections", $opt_max_connections);
   resfile_global("product", "MySQL");
+  resfile_global("xml-report", $opt_xml_report);
   # Somewhat hacky code to convert numeric version back to dot notation
   my $v1= int($mysql_version_id / 10000);
   my $v2= int(($mysql_version_id % 10000)/100);
@@ -1410,7 +1266,8 @@ sub command_line_setup {
              'help|h'                   => \$opt_usage,
 	     # list-options is internal, not listed in help
 	     'list-options'             => \$opt_list_options,
-             'skip-test-list=s'         => \@opt_skip_test_list
+             'skip-test-list=s'         => \@opt_skip_test_list,
+             'xml-report=s'             => \$opt_xml_report
            );
 
   # fix options (that take an optional argument and *only* after = sign
@@ -2578,10 +2435,23 @@ sub environment_setup {
   my $exe_innochecksum=
     mtr_exe_maybe_exists("$bindir/extra$opt_vs_config/innochecksum",
 		         "$path_client_bindir/innochecksum");
-  if ($exe_innochecksum)
-  {
-    $ENV{'INNOCHECKSUM'}= native_path($exe_innochecksum);
-  }
+  $ENV{'INNOCHECKSUM'}= native_path($exe_innochecksum) if $exe_innochecksum;
+
+  # ----------------------------------------------------
+  # mariabackup
+  # ----------------------------------------------------
+  my $exe_mariabackup= mtr_exe_maybe_exists(
+      "$bindir/extra/mariabackup$opt_vs_config/mariabackup",
+      "$path_client_bindir/mariabackup");
+
+  $ENV{XTRABACKUP}= native_path($exe_mariabackup) if $exe_mariabackup;
+
+  my $exe_xbstream= mtr_exe_maybe_exists(
+        "$bindir/extra/mariabackup/$opt_vs_config/mbstream",
+        "$path_client_bindir/mbstream");
+  $ENV{XBSTREAM}= native_path($exe_xbstream) if $exe_xbstream;
+
+  $ENV{INNOBACKUPEX}= "$exe_mariabackup --innobackupex";
 
   # Create an environment variable to make it possible
   # to detect that valgrind is being used from test cases
@@ -3369,7 +3239,8 @@ sub mysql_install_db {
   # ----------------------------------------------------------------------
   # export MYSQLD_BOOTSTRAP_CMD variable containing <path>/mysqld <args>
   # ----------------------------------------------------------------------
-  $ENV{'MYSQLD_BOOTSTRAP_CMD'}= "$exe_mysqld_bootstrap " . join(" ", @$args);
+  $ENV{'MYSQLD_BOOTSTRAP_CMD'}= "$exe_mysqld_bootstrap " . join(" ", @$args)
+    unless defined $ENV{'MYSQLD_BOOTSTRAP_CMD'};
 
   # Extra options can come not only from the command line, but also
   # from option files or combinations. We want them on a command line
@@ -3597,8 +3468,11 @@ sub do_before_run_mysqltest($)
     # to be able to distinguish them from manually created
     # version-controlled results, and to ignore them in git.
     my $dest = "$base_file$suites.result~";
-    my @cmd = ($exe_patch, qw/--binary -r - -f -s -o/,
-               $dest, $base_result, $resfile);
+    my @cmd = ($exe_patch);
+    if ($^O eq "MSWin32") {
+      push @cmd, '--binary';
+    }
+    push @cmd, (qw/-r - -f -s -o/, $dest, $base_result, $resfile);
     if (-w $resdir) {
       # don't rebuild a file if it's up to date
       unless (-e $dest and -M $dest < -M $resfile
@@ -4753,8 +4627,8 @@ sub extract_warning_lines ($$) {
      qr/InnoDB: Cannot open .*ib_buffer_pool.* for reading: No such file or directory*/,
      qr/InnoDB: Table .*mysql.*innodb_table_stats.* not found./,
      qr/InnoDB: User stopword table .* does not exist./,
-     qr/Dump thread [0-9]+ last sent to server [0-9]+ binlog file:pos .+/
-
+     qr/Dump thread [0-9]+ last sent to server [0-9]+ binlog file:pos .+/,
+     qr/Detected table cache mutex contention at instance .* waits. Additional table cache instance cannot be activated: consider raising table_open_cache_instances. Number of active instances/
     );
 
   my $matched_lines= [];
@@ -6642,6 +6516,7 @@ Misc options
                         phases of test execution.
   stress=ARGS           Run stress test, providing options to
                         mysql-stress-test.pl. Options are separated by comma.
+  xml-report=<file>     Output jUnit xml file of the results.
   tail-lines=N          Number of lines of the result to include in a failure
                         report.
 
@@ -6672,19 +6547,16 @@ sub time_format($) {
 
 our $num_tests;
 
-sub xterm_stat {
-  if (-t STDOUT and defined $ENV{TERM} and $ENV{TERM} =~ /xterm/) {
-    my ($left) = @_;
+sub titlebar_stat {
+  my ($left) = @_;
 
-    # 2.5 -> best by test
-    $num_tests = $left + 2.5 unless $num_tests;
+  # 2.5 -> best by test
+  $num_tests = $left + 2.5 unless $num_tests;
 
-    my $done = $num_tests - $left;
-    my $spent = time - $^T;
+  my $done = $num_tests - $left;
+  my $spent = time - $^T;
 
-    syswrite STDOUT, sprintf
-           "\e];mtr: spent %s on %d tests. %s (%d tests) left\a",
+  &$set_titlebar(sprintf "mtr: spent %s on %d tests. %s (%d tests) left",
            time_format($spent), $done,
-           time_format($spent/$done * $left), $left;
-  }
+           time_format($spent/$done * $left), $left);
 }

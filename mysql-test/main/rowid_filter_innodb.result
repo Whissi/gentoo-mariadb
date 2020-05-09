@@ -55,6 +55,17 @@ orders	CREATE TABLE `orders` (
   KEY `i_o_totalprice` (`o_totalprice`)
 ) ENGINE=InnoDB DEFAULT CHARSET=latin1
 set optimizer_use_condition_selectivity=2;
+select
+100 *
+(select count(*) from lineitem
+WHERE l_shipdate BETWEEN '1997-01-01' AND '1997-06-30' AND l_quantity > 45
+)
+/
+(select count(*) from lineitem
+where l_shipdate BETWEEN '1997-01-01' AND '1997-06-30')
+as correct_r_filtered_when_using_l_shipdate;
+correct_r_filtered_when_using_l_shipdate
+11.7647
 set statement optimizer_switch='rowid_filter=on' for EXPLAIN SELECT l_orderkey, l_linenumber, l_shipdate, l_quantity FROM lineitem
 WHERE  l_shipdate BETWEEN '1997-01-01' AND '1997-06-30' AND
 l_quantity > 45;
@@ -2033,6 +2044,53 @@ EXPLAIN
   }
 }
 DROP TABLE t1,t2;
+#
+# MDEV-21794: Optimizer flag rowid_filter leads to long query
+#
+create table t10(a int);
+insert into t10 values (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+create table t11(a int);
+insert into t11 select A.a + B.a* 10 + C.a * 100 from t10 A, t10 B, t10 C;
+CREATE TABLE t1 (
+el_id int(10) unsigned NOT NULL ,
+el_index blob NOT NULL,
+el_index_60 varbinary(60) NOT NULL,
+filler blob,
+PRIMARY KEY (el_id),
+KEY el_index (el_index(60)),
+KEY el_index_60 (el_index_60,el_id)
+);
+insert into t1
+select
+A.a+1000*B.a,
+A.a+1000*B.a + 10000,
+A.a+1000*B.a + 10000,
+'filler-data-filler-data'
+from
+t11 A, t10 B;
+# This must not use rowid_filter with key=el_index|el_index_60:
+explain
+select * from t1
+where el_index like '10%' and (el_index_60 like '10%' or el_index_60 like '20%');
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	range	el_index,el_index_60	el_index	62	NULL	1000	Using where
+drop table t10, t11, t1;
+#
+# MDEV-22160: SIGSEGV in st_join_table::save_explain_data on SELECT
+#
+set @save_optimizer_switch= @@optimizer_switch;
+SET @@optimizer_switch="index_merge_sort_union=OFF";
+CREATE TABLE t1 (a INT, b INT, INDEX(a), INDEX(b));
+INSERT INTO t1 VALUES (0,0),(1,0),(-1,1), (-2,1), (-2,3), (-3,4), (-2,4);
+explain
+SELECT * FROM t1 WHERE a > 0 AND b=0;
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	Extra
+1	SIMPLE	t1	ref|filter	a,b	b|a	5|5	const	2 (14%)	Using where; Using rowid filter
+SELECT * FROM t1 WHERE a > 0 AND b=0;
+a	b
+1	0
+drop table t1;
+SET @@optimizer_switch=@save_optimizer_switch;
 set @@use_stat_tables=@save_use_stat_tables;
 #
 # MDEV-18755: possible RORI-plan and possible plan with range filter
@@ -2522,3 +2580,336 @@ id	select_type	table	type	possible_keys	key	key_len	ref	rows	r_rows	filtered	r_f
 1	SIMPLE	t1	index	a,b	PRIMARY	4	NULL	3008	3008.00	1.36	0.00	Using where
 DROP TABLE t1;
 SET global innodb_stats_persistent= @stats.save;
+#
+# MDEV-21610: Using rowid filter with BKA+MRR
+#
+set @stats.save= @@innodb_stats_persistent;
+set global innodb_stats_persistent=on;
+CREATE TABLE acli (
+id bigint(20) NOT NULL,
+rid varchar(255) NOT NULL,
+tp smallint(6) NOT NULL DEFAULT 0,
+PRIMARY KEY (id),
+KEY acli_rid (rid),
+KEY acli_tp (tp)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+insert into acli(id,rid,tp) values
+(184929059698905997,'ABABABABABABABABAB',103),
+(184929059698905998,'ABABABABABABABABAB',121),
+(283586039035985921,'00000000000000000000000000000000',103),
+(2216474704108064678,'020BED6D07B741CE9B10AB2200FEF1DF',103),
+(2216474704108064679,'020BED6D07B741CE9B10AB2200FEF1DF',121),
+(3080602882609775593,'B5FCC8C7111E4E3CBC21AAF5012F59C2',103),
+(3080602882609775594,'B5FCC8C7111E4E3CBC21AAF5012F59C2',121),
+(3080602882609776594,'B5FCC8C7111E4E3CBC21AAF5012F59C2',121),
+(3080602882609777595,'B5FCC8C7111E4E3CBC21AAF5012F59C2',121),
+(4269412446747236214,'SCSCSCSCSCSCSCSC',103),
+(4269412446747236215,'SCSCSCSCSCSCSCSC',121),
+(6341490487802728356,'6072D47E513F4A4794BBAB2200FDB67D',103),
+(6341490487802728357,'6072D47E513F4A4794BBAB2200FDB67D',121);
+CREATE TABLE acei (
+id bigint(20) NOT NULL,
+aclid bigint(20) NOT NULL DEFAULT 0,
+atp smallint(6) NOT NULL DEFAULT 0,
+clus smallint(6) NOT NULL DEFAULT 0,
+PRIMARY KEY (id),
+KEY acei_aclid (aclid),
+KEY acei_clus (clus)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+insert into acei(id,aclid,atp,clus) values
+(184929059698905999,184929059698905997,0,1),
+(184929059698906000,184929059698905997,0,1),
+(184929059698906001,184929059698905997,1,1),
+(184929059698906002,184929059698905998,1,1),
+(283586039035985922,283586039035985921,1,1),
+(2216474704108064684,2216474704108064678,0,1),
+(2216474704108064685,2216474704108064678,0,1),
+(2216474704108064686,2216474704108064678,1,1),
+(2216474704108064687,2216474704108064679,1,1),
+(3080602882609775595,3080602882609775593,0,1),
+(3080602882609775596,3080602882609775593,0,1),
+(3080602882609775597,3080602882609775593,1,1),
+(3080602882609775598,3080602882609775594,1,1),
+(3080602882609776595,3080602882609776594,1,1),
+(3080602882609777596,3080602882609777595,1,1),
+(4269412446747236216,4269412446747236214,0,1),
+(4269412446747236217,4269412446747236214,0,1),
+(4269412446747236218,4269412446747236214,1,1),
+(4269412446747236219,4269412446747236215,1,1),
+(6341490487802728358,6341490487802728356,0,1),
+(6341490487802728359,6341490487802728356,0,1),
+(6341490487802728360,6341490487802728356,1,1),
+(6341490487802728361,6341490487802728357,1,1);
+CREATE TABLE filt (
+id bigint(20) NOT NULL,
+aceid bigint(20) NOT NULL DEFAULT 0,
+clid smallint(6) NOT NULL DEFAULT 0,
+fh bigint(20) NOT NULL DEFAULT 0,
+PRIMARY KEY (id),
+KEY filt_aceid (aceid),
+KEY filt_clid (clid),
+KEY filt_fh (fh)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8;
+insert into filt(id,aceid,clid,fh) values
+(184929059698905999,184929059698905999,1,8948400944397203540),
+(184929059698906000,184929059698906000,1,-3516039679025944536),
+(184929059698906001,184929059698906001,1,-3516039679025944536),
+(184929059698906002,184929059698906001,1,2965370193075218252),
+(184929059698906003,184929059698906001,1,8948400944397203540),
+(184929059698906004,184929059698906002,1,2478709353550777738),
+(283586039035985922,283586039035985922,1,5902600816362013271),
+(2216474704108064686,2216474704108064684,1,8948400944397203540),
+(2216474704108064687,2216474704108064685,1,-7244708939311117030),
+(2216474704108064688,2216474704108064686,1,-7244708939311117030),
+(2216474704108064689,2216474704108064686,1,7489060986210282479),
+(2216474704108064690,2216474704108064686,1,8948400944397203540),
+(2216474704108064691,2216474704108064687,1,-3575268945274980038),
+(3080602882609775595,3080602882609775595,1,8948400944397203540),
+(3080602882609775596,3080602882609775596,1,-5420422472375069774),
+(3080602882609775597,3080602882609775597,1,-5420422472375069774),
+(3080602882609775598,3080602882609775597,1,8518228073041491534),
+(3080602882609775599,3080602882609775597,1,8948400944397203540),
+(3080602882609775600,3080602882609775598,1,6311439873746261694),
+(3080602882609775601,3080602882609775598,1,6311439873746261694),
+(3080602882609776595,3080602882609776595,1,-661101805245999843),
+(3080602882609777596,3080602882609777596,1,-661101805245999843),
+(3080602882609777597,3080602882609777596,1,2216865386202464067),
+(4269412446747236216,4269412446747236216,1,8948400944397203540),
+(4269412446747236217,4269412446747236217,1,-1143096194892676000),
+(4269412446747236218,4269412446747236218,1,-1143096194892676000),
+(4269412446747236219,4269412446747236218,1,5313391811364818290),
+(4269412446747236220,4269412446747236218,1,8948400944397203540),
+(4269412446747236221,4269412446747236219,1,7624499822621753835),
+(6341490487802728358,6341490487802728358,1,8948400944397203540),
+(6341490487802728359,6341490487802728359,1,8141092449587136068),
+(6341490487802728360,6341490487802728360,1,8141092449587136068),
+(6341490487802728361,6341490487802728360,1,1291319099896431785),
+(6341490487802728362,6341490487802728360,1,8948400944397203540),
+(6341490487802728363,6341490487802728361,1,6701841652906431497);
+analyze table filt, acei, acli;
+Table	Op	Msg_type	Msg_text
+test.filt	analyze	status	Engine-independent statistics collected
+test.filt	analyze	status	OK
+test.acei	analyze	status	Engine-independent statistics collected
+test.acei	analyze	status	OK
+test.acli	analyze	status	Engine-independent statistics collected
+test.acli	analyze	status	OK
+set @save_optimizer_switch=@@optimizer_switch;
+set @save_join_cache_level=@@join_cache_level;
+set optimizer_switch='mrr=off';
+set join_cache_level=2;
+set statement optimizer_switch='rowid_filter=off' for explain extended select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	index_merge	PRIMARY,acli_rid,acli_tp	acli_tp,acli_rid	2,767	NULL	2	100.00	Using intersect(acli_tp,acli_rid); Using where; Using index
+1	SIMPLE	a	ref	PRIMARY,acei_aclid	acei_aclid	8	test.t.id	1	100.00	Using where
+1	SIMPLE	fi	ref	filt_aceid,filt_fh	filt_aceid	8	test.a.id	1	17.14	Using where
+Warnings:
+Note	1003	select `test`.`t`.`id` AS `id`,`test`.`fi`.`id` AS `id`,`test`.`fi`.`aceid` AS `aceid`,`test`.`fi`.`clid` AS `clid`,`test`.`fi`.`fh` AS `fh` from `test`.`acli` `t` join `test`.`acei` `a` join `test`.`filt` `fi` where `test`.`t`.`tp` = 121 and `test`.`a`.`atp` = 1 and `test`.`fi`.`aceid` = `test`.`a`.`id` and `test`.`a`.`aclid` = `test`.`t`.`id` and `test`.`t`.`rid` = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and `test`.`fi`.`fh` in (6311439873746261694,-397087483897438286,8518228073041491534,-5420422472375069774)
+set statement optimizer_switch='rowid_filter=off' for select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	id	aceid	clid	fh
+3080602882609775594	3080602882609775600	3080602882609775598	1	6311439873746261694
+3080602882609775594	3080602882609775601	3080602882609775598	1	6311439873746261694
+set statement optimizer_switch='rowid_filter=on' for explain extended select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	index_merge	PRIMARY,acli_rid,acli_tp	acli_tp,acli_rid	2,767	NULL	2	100.00	Using intersect(acli_tp,acli_rid); Using where; Using index
+1	SIMPLE	a	ref	PRIMARY,acei_aclid	acei_aclid	8	test.t.id	1	100.00	Using where
+1	SIMPLE	fi	ref|filter	filt_aceid,filt_fh	filt_aceid|filt_fh	8|8	test.a.id	1 (17%)	17.14	Using where; Using rowid filter
+Warnings:
+Note	1003	select `test`.`t`.`id` AS `id`,`test`.`fi`.`id` AS `id`,`test`.`fi`.`aceid` AS `aceid`,`test`.`fi`.`clid` AS `clid`,`test`.`fi`.`fh` AS `fh` from `test`.`acli` `t` join `test`.`acei` `a` join `test`.`filt` `fi` where `test`.`t`.`tp` = 121 and `test`.`a`.`atp` = 1 and `test`.`fi`.`aceid` = `test`.`a`.`id` and `test`.`a`.`aclid` = `test`.`t`.`id` and `test`.`t`.`rid` = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and `test`.`fi`.`fh` in (6311439873746261694,-397087483897438286,8518228073041491534,-5420422472375069774)
+set statement optimizer_switch='rowid_filter=on' for select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	id	aceid	clid	fh
+3080602882609775594	3080602882609775600	3080602882609775598	1	6311439873746261694
+3080602882609775594	3080602882609775601	3080602882609775598	1	6311439873746261694
+set optimizer_switch='mrr=on';
+set join_cache_level=6;
+set statement optimizer_switch='rowid_filter=off' for explain extended select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	index_merge	PRIMARY,acli_rid,acli_tp	acli_tp,acli_rid	2,767	NULL	2	100.00	Using intersect(acli_tp,acli_rid); Using where; Using index
+1	SIMPLE	a	ref	PRIMARY,acei_aclid	acei_aclid	8	test.t.id	1	100.00	Using where; Using join buffer (flat, BKA join); Rowid-ordered scan
+1	SIMPLE	fi	ref	filt_aceid,filt_fh	filt_aceid	8	test.a.id	1	17.14	Using where; Using join buffer (incremental, BKA join); Rowid-ordered scan
+Warnings:
+Note	1003	select `test`.`t`.`id` AS `id`,`test`.`fi`.`id` AS `id`,`test`.`fi`.`aceid` AS `aceid`,`test`.`fi`.`clid` AS `clid`,`test`.`fi`.`fh` AS `fh` from `test`.`acli` `t` join `test`.`acei` `a` join `test`.`filt` `fi` where `test`.`t`.`tp` = 121 and `test`.`a`.`atp` = 1 and `test`.`fi`.`aceid` = `test`.`a`.`id` and `test`.`a`.`aclid` = `test`.`t`.`id` and `test`.`t`.`rid` = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and `test`.`fi`.`fh` in (6311439873746261694,-397087483897438286,8518228073041491534,-5420422472375069774)
+set statement optimizer_switch='rowid_filter=off' for select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	id	aceid	clid	fh
+3080602882609775594	3080602882609775600	3080602882609775598	1	6311439873746261694
+3080602882609775594	3080602882609775601	3080602882609775598	1	6311439873746261694
+set statement optimizer_switch='rowid_filter=on' for explain extended select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	select_type	table	type	possible_keys	key	key_len	ref	rows	filtered	Extra
+1	SIMPLE	t	index_merge	PRIMARY,acli_rid,acli_tp	acli_tp,acli_rid	2,767	NULL	2	100.00	Using intersect(acli_tp,acli_rid); Using where; Using index
+1	SIMPLE	a	ref	PRIMARY,acei_aclid	acei_aclid	8	test.t.id	1	100.00	Using where; Using join buffer (flat, BKA join); Rowid-ordered scan
+1	SIMPLE	fi	ref|filter	filt_aceid,filt_fh	filt_aceid|filt_fh	8|8	test.a.id	1 (17%)	17.14	Using where; Using join buffer (incremental, BKA join); Rowid-ordered scan; Using rowid filter
+Warnings:
+Note	1003	select `test`.`t`.`id` AS `id`,`test`.`fi`.`id` AS `id`,`test`.`fi`.`aceid` AS `aceid`,`test`.`fi`.`clid` AS `clid`,`test`.`fi`.`fh` AS `fh` from `test`.`acli` `t` join `test`.`acei` `a` join `test`.`filt` `fi` where `test`.`t`.`tp` = 121 and `test`.`a`.`atp` = 1 and `test`.`fi`.`aceid` = `test`.`a`.`id` and `test`.`a`.`aclid` = `test`.`t`.`id` and `test`.`t`.`rid` = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and `test`.`fi`.`fh` in (6311439873746261694,-397087483897438286,8518228073041491534,-5420422472375069774)
+set statement optimizer_switch='rowid_filter=on' for select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+id	id	aceid	clid	fh
+3080602882609775594	3080602882609775600	3080602882609775598	1	6311439873746261694
+3080602882609775594	3080602882609775601	3080602882609775598	1	6311439873746261694
+set statement optimizer_switch='rowid_filter=on' for analyze format=json select t.id, fi.*
+from (acli t inner join acei a on a.aclid = t.id)
+inner join filt fi on a.id = fi.aceid
+where
+t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2' and
+t.tp = 121 and
+a.atp = 1 and
+fi.fh in (6311439873746261694,-397087483897438286,
+8518228073041491534,-5420422472375069774);
+ANALYZE
+{
+  "query_block": {
+    "select_id": 1,
+    "r_loops": 1,
+    "r_total_time_ms": "REPLACED",
+    "table": {
+      "table_name": "t",
+      "access_type": "index_merge",
+      "possible_keys": ["PRIMARY", "acli_rid", "acli_tp"],
+      "key_length": "2,767",
+      "index_merge": {
+        "intersect": {
+          "range": {
+            "key": "acli_tp",
+            "used_key_parts": ["tp"]
+          },
+          "range": {
+            "key": "acli_rid",
+            "used_key_parts": ["rid"]
+          }
+        }
+      },
+      "r_loops": 1,
+      "rows": 2,
+      "r_rows": 3,
+      "r_total_time_ms": "REPLACED",
+      "filtered": 100,
+      "r_filtered": 100,
+      "attached_condition": "t.tp = 121 and t.rid = 'B5FCC8C7111E4E3CBC21AAF5012F59C2'",
+      "using_index": true
+    },
+    "block-nl-join": {
+      "table": {
+        "table_name": "a",
+        "access_type": "ref",
+        "possible_keys": ["PRIMARY", "acei_aclid"],
+        "key": "acei_aclid",
+        "key_length": "8",
+        "used_key_parts": ["aclid"],
+        "ref": ["test.t.id"],
+        "r_loops": 1,
+        "rows": 1,
+        "r_rows": 3,
+        "r_total_time_ms": "REPLACED",
+        "filtered": 100,
+        "r_filtered": 100
+      },
+      "buffer_type": "flat",
+      "buffer_size": "8Kb",
+      "join_type": "BKA",
+      "mrr_type": "Rowid-ordered scan",
+      "attached_condition": "a.atp = 1",
+      "r_filtered": 100
+    },
+    "block-nl-join": {
+      "table": {
+        "table_name": "fi",
+        "access_type": "ref",
+        "possible_keys": ["filt_aceid", "filt_fh"],
+        "key": "filt_aceid",
+        "key_length": "8",
+        "used_key_parts": ["aceid"],
+        "ref": ["test.a.id"],
+        "rowid_filter": {
+          "range": {
+            "key": "filt_fh",
+            "used_key_parts": ["fh"]
+          },
+          "rows": 6,
+          "selectivity_pct": 17.143,
+          "r_rows": 5,
+          "r_selectivity_pct": 40,
+          "r_buffer_size": "REPLACED",
+          "r_filling_time_ms": "REPLACED"
+        },
+        "r_loops": 1,
+        "rows": 1,
+        "r_rows": 2,
+        "r_total_time_ms": "REPLACED",
+        "filtered": 17.143,
+        "r_filtered": 100
+      },
+      "buffer_type": "incremental",
+      "buffer_size": "603",
+      "join_type": "BKA",
+      "mrr_type": "Rowid-ordered scan",
+      "attached_condition": "fi.fh in (6311439873746261694,-397087483897438286,8518228073041491534,-5420422472375069774)",
+      "r_filtered": 100
+    }
+  }
+}
+set optimizer_switch=@save_optimizer_switch;
+set join_cache_level=@save_join_cache_level;
+drop table filt, acei, acli;
+set global innodb_stats_persistent= @stats.save;

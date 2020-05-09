@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2019, MariaDB
+   Copyright (c) 2008, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1753,7 +1753,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
   {
     mysqld_stmt_bulk_execute(thd, packet, packet_length);
 #ifdef WITH_WSREP
-    if (WSREP_ON)
+    if (WSREP(thd))
     {
         (void)wsrep_after_statement(thd);
     }
@@ -1764,7 +1764,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
   {
     mysqld_stmt_execute(thd, packet, packet_length);
 #ifdef WITH_WSREP
-    if (WSREP_ON)
+    if (WSREP(thd))
     {
         (void)wsrep_after_statement(thd);
     }
@@ -1822,7 +1822,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       break;
 
 #ifdef WITH_WSREP
-    if (WSREP_ON)
+    if (WSREP(thd))
     {
       if (wsrep_mysql_parse(thd, thd->query(), thd->query_length(),
                             &parser_state,
@@ -1844,7 +1844,6 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     while (!thd->killed && (parser_state.m_lip.found_semicolon != NULL) &&
            ! thd->is_error())
     {
-      thd->get_stmt_da()->set_skip_flush();
       /*
         Multiple queries exist, execute them individually
       */
@@ -1925,7 +1924,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       parser_state.reset(beginning_of_next_stmt, length);
 
 #ifdef WITH_WSREP
-      if (WSREP_ON)
+      if (WSREP(thd))
       {
         if (wsrep_mysql_parse(thd, beginning_of_next_stmt,
                               length, &parser_state,
@@ -2106,7 +2105,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       general_log_print(thd, command, "Log: '%s'  Pos: %lu", name, pos);
       if (nlen < FN_REFLEN)
         mysql_binlog_send(thd, thd->strmake(name, nlen), (my_off_t)pos, flags);
-      thd->unregister_slave();
+      thd->unregister_slave(); // todo: can be extraneous
       /*  fake COM_QUIT -- if we get here, the thread needs to terminate */
       error = TRUE;
       break;
@@ -3528,7 +3527,7 @@ mysql_execute_command(THD *thd)
      * and dirty reads (if configured)
      */
     if (!(thd->wsrep_applier) &&
-        !(wsrep_ready_get() && wsrep_reject_queries == WSREP_REJECT_NONE)    &&
+        !(wsrep_ready_get() && wsrep_reject_queries == WSREP_REJECT_NONE)  &&
         !(thd->variables.wsrep_dirty_reads &&
           (sql_command_flags[lex->sql_command] & CF_CHANGES_DATA) == 0)    &&
         !wsrep_tables_accessible_when_detached(all_tables)                 &&
@@ -9087,8 +9086,8 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
     else
       error= (type == KILL_TYPE_QUERY ? ER_KILL_QUERY_DENIED_ERROR :
                                         ER_KILL_DENIED_ERROR);
-    mysql_mutex_unlock(&tmp->LOCK_thd_kill);
     if (WSREP(tmp)) mysql_mutex_unlock(&tmp->LOCK_thd_data);
+    mysql_mutex_unlock(&tmp->LOCK_thd_kill);
   }
   DBUG_PRINT("exit", ("%d", error));
   DBUG_RETURN(error);

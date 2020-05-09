@@ -2836,14 +2836,34 @@ bool partition_key_modified(TABLE *table, const MY_BITMAP *fields)
 
 static inline int part_val_int(Item *item_expr, longlong *result)
 {
-  *result= item_expr->val_int();
+  switch (item_expr->cmp_type())
+  {
+  case DECIMAL_RESULT:
+  {
+    my_decimal buf;
+    my_decimal *val= item_expr->val_decimal(&buf);
+    if (val && my_decimal2int(E_DEC_FATAL_ERROR, val, item_expr->unsigned_flag,
+                              result, FLOOR) != E_DEC_OK)
+      return true;
+    break;
+  }
+  case INT_RESULT:
+    *result= item_expr->val_int();
+    break;
+  case STRING_RESULT:
+  case REAL_RESULT:
+  case ROW_RESULT:
+  case TIME_RESULT:
+    DBUG_ASSERT(0);
+    break;
+  }
   if (item_expr->null_value)
   {
     if (unlikely(current_thd->is_error()))
-      return TRUE;
+      return true;
     *result= LONGLONG_MIN;
   }
-  return FALSE;
+  return false;
 }
 
 
@@ -5984,12 +6004,30 @@ the generated partition syntax in a correct manner.
         */
         if (alter_info->partition_flags != ALTER_PARTITION_INFO ||
             !table->part_info ||
-            alter_info->requested_algorithm !=
+            alter_info->algorithm(thd) !=
               Alter_info::ALTER_TABLE_ALGORITHM_INPLACE ||
             !table->part_info->has_same_partitioning(part_info))
         {
           DBUG_PRINT("info", ("partition changed"));
           *partition_changed= true;
+        }
+      }
+
+      // In case of PARTITION BY KEY(), check if primary key has changed
+      // System versioning also implicitly adds/removes primary key parts
+      if (alter_info->partition_flags == 0 && part_info->list_of_part_fields
+          && part_info->part_field_list.elements == 0)
+      {
+        if (alter_info->flags & (ALTER_DROP_SYSTEM_VERSIONING |
+                                 ALTER_ADD_SYSTEM_VERSIONING))
+          *partition_changed= true;
+
+        List_iterator<Key> it(alter_info->key_list);
+        Key *key;
+        while((key= it++) && !*partition_changed)
+        {
+          if (key->type == Key::PRIMARY)
+            *partition_changed= true;
         }
       }
       /*
@@ -6828,9 +6866,9 @@ static void release_log_entries(partition_info *part_info)
     alter_partition_lock_handling()
     lpt                        Struct carrying parameters
   RETURN VALUES
-    NONE
+    true on error
 */
-static void alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
+static bool alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
 {
   THD *thd= lpt->thd;
 
@@ -6844,23 +6882,9 @@ static void alter_partition_lock_handling(ALTER_PARTITION_PARAM_TYPE *lpt)
   lpt->table= 0;
   lpt->table_list->table= 0;
   if (thd->locked_tables_mode)
-  {
-    Diagnostics_area *stmt_da= NULL;
-    Diagnostics_area tmp_stmt_da(true);
+    return thd->locked_tables_list.reopen_tables(thd, false);
 
-    if (unlikely(thd->is_error()))
-    {
-      /* reopen might fail if we have a previous error, use a temporary da. */
-      stmt_da= thd->get_stmt_da();
-      thd->set_stmt_da(&tmp_stmt_da);
-    }
-
-    if (unlikely(thd->locked_tables_list.reopen_tables(thd, false)))
-      sql_print_warning("We failed to reacquire LOCKs in ALTER TABLE");
-
-    if (stmt_da)
-      thd->set_stmt_da(stmt_da);
-  }
+  return false;
 }
 
 
@@ -7061,6 +7085,8 @@ err_exclusive_lock:
       thd->set_stmt_da(&tmp_stmt_da);
     }
 
+    /* NB: error status is not needed here, the statement fails with
+       the original error. */
     if (unlikely(thd->locked_tables_list.reopen_tables(thd, false)))
       sql_print_warning("We failed to reacquire LOCKs in ALTER TABLE");
 
@@ -7284,13 +7310,14 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_ERROR("fail_drop_partition_8") ||
         (write_log_completed(lpt, FALSE), FALSE) ||
         ERROR_INJECT_CRASH("crash_drop_partition_9") ||
-        ERROR_INJECT_ERROR("fail_drop_partition_9") ||
-        (alter_partition_lock_handling(lpt), FALSE)) 
+        ERROR_INJECT_ERROR("fail_drop_partition_9"))
     {
       handle_alter_part_error(lpt, action_completed, TRUE, frm_install,
                               close_table_on_failure);
       goto err;
     }
+    if (alter_partition_lock_handling(lpt))
+      goto err;
   }
   else if ((alter_info->partition_flags & ALTER_PARTITION_ADD) &&
            (part_info->part_type == RANGE_PARTITION ||
@@ -7361,13 +7388,14 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_ERROR("fail_add_partition_9") ||
         (write_log_completed(lpt, FALSE), FALSE) ||
         ERROR_INJECT_CRASH("crash_add_partition_10") ||
-        ERROR_INJECT_ERROR("fail_add_partition_10") ||
-        (alter_partition_lock_handling(lpt), FALSE))
+        ERROR_INJECT_ERROR("fail_add_partition_10"))
     {
       handle_alter_part_error(lpt, action_completed, FALSE, frm_install,
                               close_table_on_failure);
       goto err;
     }
+    if (alter_partition_lock_handling(lpt))
+      goto err;
   }
   else
   {
@@ -7466,13 +7494,14 @@ uint fast_alter_partition_table(THD *thd, TABLE *table,
         ERROR_INJECT_ERROR("fail_change_partition_11") ||
         (write_log_completed(lpt, FALSE), FALSE) ||
         ERROR_INJECT_CRASH("crash_change_partition_12") ||
-        ERROR_INJECT_ERROR("fail_change_partition_12") ||
-        (alter_partition_lock_handling(lpt), FALSE))
+        ERROR_INJECT_ERROR("fail_change_partition_12"))
     {
       handle_alter_part_error(lpt, action_completed, FALSE, frm_install,
                               close_table_on_failure);
       goto err;
     }
+    if (alter_partition_lock_handling(lpt))
+      goto err;
   }
   downgrade_mdl_if_lock_tables_mode(thd, mdl_ticket, MDL_SHARED_NO_READ_WRITE);
   /*

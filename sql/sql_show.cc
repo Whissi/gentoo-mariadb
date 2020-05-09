@@ -64,6 +64,7 @@
 #endif
 #include "transaction.h"
 #include "opt_trace.h"
+#include "my_cpu.h"
 
 enum enum_i_s_events_fields
 {
@@ -593,7 +594,7 @@ static struct show_privileges_st sys_privileges[]=
   {"Create view", "Tables",  "To create new views"},
   {"Create user", "Server Admin",  "To create new users"},
   {"Delete", "Tables",  "To delete existing rows"},
-  {"Delete versioning rows", "Tables", "To delete versioning table historical rows"},
+  {"Delete history", "Tables", "To delete versioning table historical rows"},
   {"Drop", "Databases,Tables", "To drop databases, tables, and views"},
 #ifdef HAVE_EVENT_SCHEDULER
   {"Event","Server Admin","To create, alter, drop and execute events"},
@@ -3692,6 +3693,11 @@ const char* get_one_variable(THD *thd,
         end= pos + ls->length;
       break;
     }
+  case SHOW_ATOMIC_COUNTER_UINT32_T:
+    end= int10_to_str(
+           static_cast<long>(*static_cast<Atomic_counter<uint32_t>*>(value)),
+           buff, 10);
+    break;
   case SHOW_UNDEF:
     break;                                        // Return empty string
   case SHOW_SYS:                                  // Cannot happen
@@ -8765,7 +8771,6 @@ end:
 bool optimize_schema_tables_reads(JOIN *join)
 {
   THD *thd= join->thd;
-  bool result= 0;
   DBUG_ENTER("optimize_schema_tables_reads");
 
   JOIN_TAB *tab;
@@ -8800,11 +8805,11 @@ bool optimize_schema_tables_reads(JOIN *join)
         */
         cond= tab->cache_select->cond;
       }
-
-      optimize_for_get_all_tables(thd, table_list, cond);
+      if (optimize_for_get_all_tables(thd, table_list, cond))
+        DBUG_RETURN(TRUE);   // Handle OOM
     }
   }
-  DBUG_RETURN(result);
+  DBUG_RETURN(FALSE);
 }
 
 

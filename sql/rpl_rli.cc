@@ -1435,31 +1435,27 @@ Relay_log_info::alloc_inuse_relaylog(const char *name)
   uint32 gtid_count;
   rpl_gtid *gtid_list;
 
-  if (!(ir= (inuse_relaylog *)my_malloc(sizeof(*ir), MYF(MY_WME|MY_ZEROFILL))))
-  {
-    my_error(ER_OUTOFMEMORY, MYF(0), (int)sizeof(*ir));
-    return 1;
-  }
   gtid_count= relay_log_state.count();
   if (!(gtid_list= (rpl_gtid *)my_malloc(sizeof(*gtid_list)*gtid_count,
                                          MYF(MY_WME))))
   {
-    my_free(ir);
     my_error(ER_OUTOFMEMORY, MYF(0), (int)sizeof(*gtid_list)*gtid_count);
+    return 1;
+  }
+  if (!(ir= new inuse_relaylog(this, gtid_list, gtid_count, name)))
+  {
+    my_free(gtid_list);
+    my_error(ER_OUTOFMEMORY, MYF(0), (int) sizeof(*ir));
     return 1;
   }
   if (relay_log_state.get_gtid_list(gtid_list, gtid_count))
   {
     my_free(gtid_list);
-    my_free(ir);
+    delete ir;
     DBUG_ASSERT(0 /* Should not be possible as we allocated correct length */);
     my_error(ER_OUT_OF_RESOURCES, MYF(0));
     return 1;
   }
-  ir->rli= this;
-  strmake_buf(ir->name, name);
-  ir->relay_log_state= gtid_list;
-  ir->relay_log_state_count= gtid_count;
 
   if (!inuse_relaylog_list)
     inuse_relaylog_list= ir;
@@ -1478,7 +1474,7 @@ void
 Relay_log_info::free_inuse_relaylog(inuse_relaylog *ir)
 {
   my_free(ir->relay_log_state);
-  my_free(ir);
+  delete ir;
 }
 
 
@@ -2019,10 +2015,9 @@ find_gtid_slave_pos_tables(THD *thd)
       However we can add new entries, and warn about any tables that
       disappeared, but may still be visible to running SQL threads.
     */
-    rpl_slave_state::gtid_pos_table *old_entry, *new_entry, **next_ptr_ptr;
-
-    old_entry= (rpl_slave_state::gtid_pos_table *)
-      rpl_global_gtid_slave_state->gtid_pos_tables;
+    rpl_slave_state::gtid_pos_table *new_entry, **next_ptr_ptr;
+    auto old_entry= rpl_global_gtid_slave_state->
+                    gtid_pos_tables.load(std::memory_order_relaxed);
     while (old_entry)
     {
       new_entry= cb_data.table_list;
@@ -2044,8 +2039,8 @@ find_gtid_slave_pos_tables(THD *thd)
     while (new_entry)
     {
       /* Check if we already have a table with this storage engine. */
-      old_entry= (rpl_slave_state::gtid_pos_table *)
-        rpl_global_gtid_slave_state->gtid_pos_tables;
+      old_entry= rpl_global_gtid_slave_state->
+                 gtid_pos_tables.load(std::memory_order_relaxed);
       while (old_entry)
       {
         if (new_entry->table_hton == old_entry->table_hton)

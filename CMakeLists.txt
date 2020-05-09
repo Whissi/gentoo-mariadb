@@ -1,5 +1,5 @@
 # Copyright (c) 2006, 2017, Oracle and/or its affiliates.
-# Copyright (c) 2008, 2019, MariaDB Corporation.
+# Copyright (c) 2008, 2020, MariaDB Corporation.
 # 
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -222,7 +222,7 @@ ENDIF()
 
 OPTION(WITH_UBSAN "Enable undefined behavior sanitizer" OFF)
 IF (WITH_UBSAN)
-  MY_CHECK_AND_SET_COMPILER_FLAG("-fsanitize=undefined -fno-sanitize=alignment -U_FORTIFY_SOURCE" DEBUG RELWITHDEBINFO)
+  MY_CHECK_AND_SET_COMPILER_FLAG("-fsanitize=undefined -fno-sanitize=alignment -U_FORTIFY_SOURCE -DWITH_UBSAN" DEBUG RELWITHDEBINFO)
 ENDIF()
 
 OPTION(WITH_MSAN "Enable memory sanitizer" OFF)
@@ -242,8 +242,11 @@ IF(SECURITY_HARDENED AND NOT WITH_ASAN AND NOT WITH_UBSAN AND NOT WITH_TSAN)
 ENDIF()
 
 INCLUDE(wsrep)
-INCLUDE(cpack_rpm)
-INCLUDE(cpack_deb)
+
+OPTION(WITH_DBUG_TRACE "Enable DBUG_ENTER()/DBUG_EXIT()" ON)
+IF(WITH_DBUG_TRACE)
+  ADD_DEFINITIONS(-DDBUG_TRACE)
+ENDIF()
 
 # Always enable debug sync for debug builds.
 SET(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DENABLED_DEBUG_SYNC")
@@ -364,8 +367,6 @@ MYSQL_CHECK_SSL()
 MYSQL_CHECK_READLINE()
 
 SET(MALLOC_LIBRARY "system")
-SET(PYTHON_SHEBANG "/usr/bin/env python" CACHE STRING "python shebang")
-MARK_AS_ADVANCED(PYTHON_SHEBANG)
 
 CHECK_PCRE()
 
@@ -401,6 +402,12 @@ ENDIF()
 SET (MYSQLD_STATIC_PLUGIN_LIBS "" CACHE INTERNAL "")
 
 INCLUDE(mariadb_connector_c) # this does ADD_SUBDIRECTORY(libmariadb)
+
+INCLUDE(cpack_rpm)
+INCLUDE(cpack_deb)
+
+SET(PYTHON_SHEBANG "/usr/bin/env python" CACHE STRING "python shebang")
+MARK_AS_ADVANCED(PYTHON_SHEBANG)
 
 # Add storage engines and plugins.
 CONFIGURE_PLUGINS()

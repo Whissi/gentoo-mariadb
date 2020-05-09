@@ -47,21 +47,6 @@ sub skip_combinations {
   $skip{'main/plugin_loaderr.test'} = 'needs compiled-in innodb'
             unless $::mysqld_variables{'innodb'} eq "ON";
 
-  $skip{'include/have_mariabackup.inc'} = 'Need mariabackup'
-            unless ::have_mariabackup();
-
-  $skip{'include/have_mariabackup.inc'} = 'Need socket statistics utility'
-            unless IS_WINDOWS || ::which("ss");
-
-  $skip{'include/have_mariabackup.inc'} = 'Need socat or nc'
-            unless IS_WINDOWS || $ENV{MTR_GALERA_TFMT};
-
-  $skip{'include/have_garbd.inc'} = 'Need garbd'
-            unless ::have_garbd();
-
-  $skip{'include/have_file_key_management.inc'} = 'Needs file_key_management plugin'
-            unless $ENV{FILE_KEY_MANAGEMENT_SO};
-
   # disable tests that use ipv6, if unsupported
   sub ipv6_ok() {
     use Socket;
@@ -88,6 +73,9 @@ sub skip_combinations {
 
   $skip{'main/ssl_verify_ip.test'} = 'x509v3 support required'
     unless $openssl_ver ge "1.0.2";
+
+  $skip{'main/tls_version1.test'} = 'https://github.com/wolfSSL/wolfssl/issues/2960'
+    if $ssl_lib =~ /WolfSSL 4.4.0/;
 
   %skip;
 }

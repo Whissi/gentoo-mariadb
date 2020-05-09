@@ -2,7 +2,7 @@
 #define HANDLER_INCLUDED
 /*
    Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB
+   Copyright (c) 2009, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -2453,11 +2453,14 @@ public:
   */
   const char *unsupported_reason;
 
+  /** true when InnoDB should abort the alter when table is not empty */
+  bool error_if_not_empty;
+
   Alter_inplace_info(HA_CREATE_INFO *create_info_arg,
                      Alter_info *alter_info_arg,
                      KEY *key_info_arg, uint key_count_arg,
                      partition_info *modified_part_info_arg,
-                     bool ignore_arg);
+                     bool ignore_arg, bool error_non_empty);
 
   ~Alter_inplace_info()
   {
@@ -2905,14 +2908,14 @@ public:
     data_file_length(0), max_data_file_length(0),
     index_file_length(0), max_index_file_length(0), delete_length(0),
     auto_increment_value(0), records(0), deleted(0), mean_rec_length(0),
-    create_time(0), check_time(0), update_time(0), block_size(0),
+    create_time(0), check_time(0), update_time(0), block_size(8192),
     checksum(0), checksum_null(FALSE), mrr_length_per_rec(0)
   {}
 };
 
-extern "C" enum icp_result handler_index_cond_check(void* h_arg);
+extern "C" check_result_t handler_index_cond_check(void* h_arg);
 
-extern "C" int handler_rowid_filter_check(void* h_arg);
+extern "C" check_result_t handler_rowid_filter_check(void* h_arg);
 extern "C" int handler_rowid_filter_is_active(void* h_arg);
 
 uint calculate_key_len(TABLE *, uint, const uchar *, key_part_map);
@@ -2936,6 +2939,13 @@ public:
   virtual ~Handler_share() {}
 };
 
+enum class Compare_keys : uint32_t
+{
+  Equal,
+  EqualButKeyPartLength,
+  EqualButComment,
+  NotEqual
+};
 
 /**
   The handler class is the interface for dynamically loadable
@@ -4827,7 +4837,8 @@ public:
 
   virtual void set_lock_type(enum thr_lock_type lock);
 
-  friend enum icp_result handler_index_cond_check(void* h_arg);
+  friend check_result_t handler_index_cond_check(void* h_arg);
+  friend check_result_t handler_rowid_filter_check(void *h_arg);
 
   /**
     Find unique record by index or unique constrain
@@ -4876,6 +4887,13 @@ public:
   {
     return false;
   }
+
+  /* Used for ALTER TABLE.
+  Some engines can handle some differences in indexes by themself. */
+  virtual Compare_keys compare_key_parts(const Field &old_field,
+                                         const Column_definition &new_field,
+                                         const KEY_PART_INFO &old_part,
+                                         const KEY_PART_INFO &new_part) const;
 
 protected:
   Handler_share *get_ha_share_ptr();
@@ -5069,4 +5087,15 @@ void print_keydup_error(TABLE *table, KEY *key, myf errflag);
 
 int del_global_index_stat(THD *thd, TABLE* table, KEY* key_info);
 int del_global_table_stat(THD *thd, const  LEX_CSTRING *db, const LEX_CSTRING *table);
+#ifndef DBUG_OFF
+/** Converts XID to string.
+
+@param[out] buf output buffer
+@param[in] xid XID to convert
+
+@return pointer to converted string
+
+@note This does not need to be multi-byte safe or anything */
+char *xid_to_str(char *buf, const XID &xid);
+#endif // !DBUG_OFF
 #endif /* HANDLER_INCLUDED */

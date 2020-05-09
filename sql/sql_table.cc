@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2010, 2019, MariaDB
+   Copyright (c) 2010, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -4311,6 +4311,8 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
         const Virtual_column_info *dup_check;
         while ((dup_check= dup_it++) && dup_check != check)
         {
+          if (!dup_check->name.length || dup_check->automatic_name)
+            continue;
           if (!lex_string_cmp(system_charset_info,
                               &check->name, &dup_check->name))
           {
@@ -4392,8 +4394,11 @@ bool validate_comment_length(THD *thd, LEX_CSTRING *comment, size_t max_len,
                              uint err_code, const char *name)
 {
   DBUG_ENTER("validate_comment_length");
-  size_t tmp_len= my_charpos(system_charset_info, comment->str,
-                           comment->str + comment->length, max_len);
+  if (comment->length == 0)
+    DBUG_RETURN(false);
+
+  size_t tmp_len=
+      Well_formed_prefix(system_charset_info, *comment, max_len).length();
   if (tmp_len < comment->length)
   {
     if (thd->is_strict_mode())
@@ -5615,9 +5620,11 @@ bool mysql_create_like_table(THD* thd, TABLE_LIST* table,
   DBUG_ENTER("mysql_create_like_table");
 
 #ifdef WITH_WSREP
-  if (WSREP_ON && !thd->wsrep_applier &&
+  if (WSREP(thd) && !thd->wsrep_applier &&
       wsrep_create_like_table(thd, table, src_table, create_info))
+  {
     DBUG_RETURN(res);
+  }
 #endif
 
   /*
@@ -6579,38 +6586,68 @@ static int compare_uint(const uint *s, const uint *t)
   return (*s < *t) ? -1 : ((*s > *t) ? 1 : 0);
 }
 
-enum class Compare_keys : uint32_t
-{
-  Equal,
-  EqualButKeyPartLength,
-  EqualButComment,
-  NotEqual
-};
+static Compare_keys merge(Compare_keys current, Compare_keys add) {
+  if (current == Compare_keys::Equal)
+    return add;
+
+  if (add == Compare_keys::Equal)
+    return current;
+
+  if (current == add)
+    return current;
+
+  if (current == Compare_keys::EqualButComment) {
+    return Compare_keys::NotEqual;
+  }
+
+  if (current == Compare_keys::EqualButKeyPartLength) {
+    if (add == Compare_keys::EqualButComment)
+      return Compare_keys::NotEqual;
+    DBUG_ASSERT(add == Compare_keys::NotEqual);
+    return Compare_keys::NotEqual;
+  }
+
+  DBUG_ASSERT(current == Compare_keys::NotEqual);
+  return current;
+}
 
 Compare_keys compare_keys_but_name(const KEY *table_key, const KEY *new_key,
                                    Alter_info *alter_info, const TABLE *table,
                                    const KEY *const new_pk,
                                    const KEY *const old_pk)
 {
-  Compare_keys result= Compare_keys::Equal;
+  if (table_key->algorithm != new_key->algorithm)
+    return Compare_keys::NotEqual;
 
-  if ((table_key->algorithm != new_key->algorithm) ||
-      ((table_key->flags & HA_KEYFLAG_MASK) !=
-       (new_key->flags & HA_KEYFLAG_MASK)) ||
-      (table_key->user_defined_key_parts != new_key->user_defined_key_parts))
+  if ((table_key->flags & HA_KEYFLAG_MASK) !=
+      (new_key->flags & HA_KEYFLAG_MASK))
+    return Compare_keys::NotEqual;
+
+  if (table_key->user_defined_key_parts != new_key->user_defined_key_parts)
     return Compare_keys::NotEqual;
 
   if (table_key->block_size != new_key->block_size)
+    return Compare_keys::NotEqual;
+
+  /*
+  Rebuild the index if following condition get satisfied:
+
+  (i) Old table doesn't have primary key, new table has it and vice-versa
+  (ii) Primary key changed to another existing index
+  */
+  if ((new_key == new_pk) != (table_key == old_pk))
     return Compare_keys::NotEqual;
 
   if (engine_options_differ(table_key->option_struct, new_key->option_struct,
                             table->file->ht->index_options))
     return Compare_keys::NotEqual;
 
-  const KEY_PART_INFO *end=
-      table_key->key_part + table_key->user_defined_key_parts;
-  for (const KEY_PART_INFO *key_part= table_key->key_part,
-                           *new_part= new_key->key_part;
+  Compare_keys result= Compare_keys::Equal;
+
+  for (const KEY_PART_INFO *
+           key_part= table_key->key_part,
+          *new_part= new_key->key_part,
+          *end= table_key->key_part + table_key->user_defined_key_parts;
        key_part < end; key_part++, new_part++)
   {
     /*
@@ -6618,61 +6655,23 @@ Compare_keys compare_keys_but_name(const KEY *table_key, const KEY *new_key,
       object with adjusted length. So below we have to check field
       indexes instead of simply comparing pointers to Field objects.
     */
-    Create_field *new_field= alter_info->create_list.elem(new_part->fieldnr);
-    if (!new_field->field ||
-        new_field->field->field_index != key_part->fieldnr - 1)
+    const Create_field &new_field=
+        *alter_info->create_list.elem(new_part->fieldnr);
+
+    if (!new_field.field ||
+        new_field.field->field_index != key_part->fieldnr - 1)
+    {
       return Compare_keys::NotEqual;
-
-    /*
-      If there is a change in index length due to column expansion
-      like varchar(X) changed to varchar(X + N) and has a compatible
-      packed data representation, we mark it for fast/INPLACE change
-      in index definition. InnoDB supports INPLACE for this cases
-
-      Key definition has changed if we are using a different field or
-      if the user key part length is different.
-    */
-    const Field *old_field= table->field[key_part->fieldnr - 1];
-
-    bool is_equal= key_part->field->is_equal(*new_field);
-    /* TODO: below is an InnoDB specific code which should be moved to InnoDB */
-    if (!is_equal)
-    {
-      if (!key_part->field->can_be_converted_by_engine(*new_field))
-        return Compare_keys::NotEqual;
-
-      if (!Charset(old_field->charset())
-               .eq_collation_specific_names(new_field->charset))
-        return Compare_keys::NotEqual;
     }
 
-    if (key_part->length != new_part->length)
-    {
-      if (key_part->length != old_field->field_length ||
-          key_part->length >= new_part->length || is_equal)
-      {
-        return Compare_keys::NotEqual;
-      }
-      result= Compare_keys::EqualButKeyPartLength;
-    }
+    auto compare= table->file->compare_key_parts(
+        *table->field[key_part->fieldnr - 1], new_field, *key_part, *new_part);
+    result= merge(result, compare);
   }
-
-  /*
-  Rebuild the index if following condition get satisfied:
-
-  (i) Old table doesn't have primary key, new table has it and vice-versa
-  (ii) Primary key changed to another existing index
-*/
-  if ((new_key == new_pk) != (table_key == old_pk))
-    return Compare_keys::NotEqual;
 
   /* Check that key comment is not changed. */
   if (cmp(table_key->comment, new_key->comment) != 0)
-  {
-    if (result != Compare_keys::Equal)
-      return Compare_keys::NotEqual;
-    result= Compare_keys::EqualButComment;
-  }
+    result= merge(result, Compare_keys::EqualButComment);
 
   return result;
 }
@@ -8482,8 +8481,8 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
 	  key_part_length= 0;			// Use whole field
       }
       key_part_length /= kfield->charset()->mbmaxlen;
-      key_parts.push_back(new Key_part_spec(&cfield->field_name,
-					    key_part_length),
+      key_parts.push_back(new (thd->mem_root) Key_part_spec(
+                            &cfield->field_name, key_part_length),
                           thd->mem_root);
     }
     if (table->s->tmp_table == NO_TMP_TABLE)
@@ -8549,7 +8548,7 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
       tmp_name.str= key_name;
       tmp_name.length= strlen(key_name);
       /* We dont need LONG_UNIQUE_HASH_FIELD flag because it will be autogenerated */
-      key= new Key(key_type, &tmp_name, &key_create_info,
+      key= new (thd->mem_root) Key(key_type, &tmp_name, &key_create_info,
                    MY_TEST(key_info->flags & HA_GENERATED_KEY),
                    &key_parts, key_info->option_list, DDL_options());
       new_key_list.push_back(key, thd->mem_root);
@@ -8629,26 +8628,37 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
         }
       }
 
+      // NB: `check` is TABLE resident, we must keep it intact.
+      if (keep)
+      {
+        check= check->clone(thd);
+        if (!check)
+        {
+          my_error(ER_OUT_OF_RESOURCES, MYF(0));
+          goto err;
+        }
+      }
+
       if (share->period.constr_name.streq(check->name.str))
       {
-        if (!drop_period && !keep)
+        if (drop_period)
+        {
+          keep= false;
+        }
+        else if(!keep)
         {
           my_error(ER_PERIOD_CONSTRAINT_DROP, MYF(0), check->name.str,
                    share->period.name.str);
           goto err;
         }
-        keep= keep && !drop_period;
-
-        DBUG_ASSERT(create_info->period_info.constr == NULL || drop_period);
-
-        if (keep)
+        else
         {
-          Item *expr_copy= check->expr->get_copy(thd);
-          check= new Virtual_column_info();
-          check->expr= expr_copy;
+          DBUG_ASSERT(create_info->period_info.constr == NULL);
           create_info->period_info.constr= check;
+          create_info->period_info.constr->automatic_name= true;
         }
       }
+
       /* see if the constraint depends on *only* on dropped fields */
       if (keep && dropped_fields)
       {
@@ -9762,7 +9772,7 @@ do_continue:;
   */
   if (!(alter_info->flags & ~(ALTER_RENAME | ALTER_KEYS_ONOFF)) &&
       alter_info->partition_flags == 0 &&
-      alter_info->requested_algorithm !=
+      alter_info->algorithm(thd) !=
       Alter_info::ALTER_TABLE_ALGORITHM_COPY)   // No need to touch frm.
   {
     bool res;
@@ -9839,7 +9849,7 @@ do_continue:;
                "LOCK=DEFAULT");
       DBUG_RETURN(true);
     }
-    else if (alter_info->requested_algorithm !=
+    else if (alter_info->algorithm(thd) !=
              Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT)
     {
       my_error(ER_ALTER_OPERATION_NOT_SUPPORTED_REASON, MYF(0),
@@ -9879,20 +9889,21 @@ do_continue:;
       using in-place API.
   */
   if ((thd->variables.alter_algorithm == Alter_info::ALTER_TABLE_ALGORITHM_COPY &&
-       alter_info->requested_algorithm !=
+       alter_info->algorithm(thd) !=
        Alter_info::ALTER_TABLE_ALGORITHM_INPLACE)
       || is_inplace_alter_impossible(table, create_info, alter_info)
       || IF_PARTITIONING((partition_changed &&
           !(table->s->db_type()->partition_flags() & HA_USE_AUTO_PARTITION)), 0))
   {
-    if (alter_info->requested_algorithm ==
+    if (alter_info->algorithm(thd) ==
         Alter_info::ALTER_TABLE_ALGORITHM_INPLACE)
     {
       my_error(ER_ALTER_OPERATION_NOT_SUPPORTED, MYF(0),
                "ALGORITHM=INPLACE", "ALGORITHM=COPY");
       DBUG_RETURN(true);
     }
-    alter_info->requested_algorithm= Alter_info::ALTER_TABLE_ALGORITHM_COPY;
+    alter_info->set_requested_algorithm(
+      Alter_info::ALTER_TABLE_ALGORITHM_COPY);
   }
 
   /*
@@ -10008,12 +10019,12 @@ do_continue:;
   /* Remember that we have not created table in storage engine yet. */
   bool no_ha_table= true;
 
-  if (alter_info->requested_algorithm != Alter_info::ALTER_TABLE_ALGORITHM_COPY)
+  if (alter_info->algorithm(thd) != Alter_info::ALTER_TABLE_ALGORITHM_COPY)
   {
     Alter_inplace_info ha_alter_info(create_info, alter_info,
                                      key_info, key_count,
                                      IF_PARTITIONING(thd->work_part_info, NULL),
-                                     ignore);
+                                     ignore, alter_ctx.error_if_not_empty);
     TABLE_SHARE altered_share;
     TABLE altered_table;
     bool use_inplace= true;
@@ -10098,7 +10109,7 @@ do_continue:;
     // If SHARED lock and no particular algorithm was requested, use COPY.
     if (inplace_supported == HA_ALTER_INPLACE_EXCLUSIVE_LOCK &&
         alter_info->requested_lock == Alter_info::ALTER_TABLE_LOCK_SHARED &&
-         alter_info->requested_algorithm ==
+         alter_info->algorithm(thd) ==
                  Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT &&
          thd->variables.alter_algorithm ==
                  Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT)
@@ -10458,8 +10469,8 @@ err_new_table_cleanup:
     bool save_abort_on_warning= thd->abort_on_warning;
     thd->abort_on_warning= true;
     thd->push_warning_truncated_value_for_field(Sql_condition::WARN_LEVEL_WARN,
-                                                f_type, f_val,
-                                                new_table->s,
+                                                f_type, f_val, new_table
+                                                ? new_table->s : table->s,
                                                 alter_ctx.datetime_field->
                                                 field_name.str);
     thd->abort_on_warning= save_abort_on_warning;
@@ -10575,7 +10586,6 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
   bool make_versioned= !from->versioned() && to->versioned();
   bool make_unversioned= from->versioned() && !to->versioned();
   bool keep_versioned= from->versioned() && to->versioned();
-  bool drop_history= false; // XXX
   Field *to_row_start= NULL, *to_row_end= NULL, *from_row_end= NULL;
   MYSQL_TIME query_start;
   DBUG_ENTER("copy_data_between_tables");
@@ -10706,10 +10716,6 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
   {
     from_row_end= from->vers_end_field();
   }
-  else if (keep_versioned && drop_history)
-  {
-    from_row_end= from->vers_end_field();
-  }
 
   if (from_row_end)
     bitmap_set_bit(from->read_set, from_row_end->field_index);
@@ -10746,6 +10752,13 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
       error= 1;
       break;
     }
+
+    if (make_unversioned)
+    {
+      if (!from_row_end->is_max())
+        continue; // Drop history rows.
+    }
+
     if (unlikely(++thd->progress.counter >= time_to_report_progress))
     {
       time_to_report_progress+= MY_HOW_OFTEN_TO_WRITE/10;
@@ -10765,19 +10778,11 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
       copy_ptr->do_copy(copy_ptr);
     }
 
-    if (drop_history && from_row_end && !from_row_end->is_max())
-      continue;
-
     if (make_versioned)
     {
       to_row_start->set_notnull();
       to_row_start->store_time(&query_start);
       to_row_end->set_max();
-    }
-    else if (make_unversioned)
-    {
-      if (!from_row_end->is_max())
-        continue; // Drop history rows.
     }
 
     prev_insert_id= to->file->next_insert_id;
@@ -10959,7 +10964,8 @@ bool mysql_recreate_table(THD *thd, TABLE_LIST *table_list, bool table_copy)
   alter_info.flags= (ALTER_CHANGE_COLUMN | ALTER_RECREATE);
 
   if (table_copy)
-    alter_info.requested_algorithm= Alter_info::ALTER_TABLE_ALGORITHM_COPY;
+    alter_info.set_requested_algorithm(
+      Alter_info::ALTER_TABLE_ALGORITHM_COPY);
 
   bool res= mysql_alter_table(thd, &null_clex_str, &null_clex_str, &create_info,
                                 table_list, &alter_info, 0,

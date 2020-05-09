@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2011, 2018, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2019, MariaDB Corporation.
+Copyright (c) 2016, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -592,7 +592,7 @@ doc_id_t
 fts_get_doc_id_from_rec(
 	const rec_t*		rec,
 	const dict_index_t*	index,
-	const offset_t*		offsets);
+	const rec_offs*		offsets);
 
 /** Add new fts doc id to the update vector.
 @param[in]	table		the table that contains the FTS index.
@@ -876,20 +876,18 @@ fts_valid_stopword_table(
 						name */
 /****************************************************************//**
 This function loads specified stopword into FTS cache
-@return TRUE if success */
-ibool
+@return true if success */
+bool
 fts_load_stopword(
 /*==============*/
 	const dict_table_t*
 			table,			/*!< in: Table with FTS */
 	trx_t*		trx,			/*!< in: Transaction */
-	const char*	global_stopword_table,	/*!< in: Global stopword table
-						name */
 	const char*	session_stopword_table,	/*!< in: Session stopword table
 						name */
-	ibool		stopword_is_on,		/*!< in: Whether stopword
+	bool		stopword_is_on,		/*!< in: Whether stopword
 						option is turned on/off */
-	ibool		reload);		/*!< in: Whether it is during
+	bool		reload);		/*!< in: Whether it is during
 						reload of FTS table */
 
 /****************************************************************//**

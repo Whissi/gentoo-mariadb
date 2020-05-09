@@ -555,6 +555,7 @@ public:
     name.str= NULL;
     name.length= 0;
   };
+  Virtual_column_info* clone(THD *thd);
   ~Virtual_column_info() {};
   enum_vcol_info_type get_vcol_type() const
   {
@@ -694,7 +695,7 @@ public:
   enum imagetype { itRAW, itMBR};
 
   utype		unireg_check;
-  uint32	field_length;		// Length of field
+  const uint32	field_length;		// Length of field
   uint32	flags;
   uint16        field_index;            // field number in fields array
   uchar		null_bit;		// Bit used to test null bit

@@ -217,8 +217,7 @@ explain select * from t1 where a=1 or b=1	{
                     "type": "index_merge",
                     "records": 2,
                     "cost": 4.1484,
-                    "uses_join_buffering": false,
-                    "filter_used": false
+                    "uses_join_buffering": false
                   }
                 },
                 "rows_for_plan": 2,
@@ -323,7 +322,7 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                 "using_mrr": false,
                 "index_only": false,
                 "rows": 2243,
-                "cost": 2862.1,
+                "cost": 2844.1,
                 "chosen": true
             },
             
@@ -337,7 +336,7 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                 "using_mrr": false,
                 "index_only": false,
                 "rows": 2243,
-                "cost": 2862.1,
+                "cost": 2844.1,
                 "chosen": false,
                 "cause": "cost"
             },
@@ -352,7 +351,7 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                 "using_mrr": false,
                 "index_only": false,
                 "rows": 2243,
-                "cost": 2862.1,
+                "cost": 2844.1,
                 "chosen": false,
                 "cause": "cost"
             }
@@ -501,7 +500,7 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                                 "using_mrr": false,
                                 "index_only": true,
                                 "rows": 2243,
-                                "cost": 170.53,
+                                "cost": 152.53,
                                 "chosen": true
                             },
                             
@@ -515,13 +514,13 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                                 "using_mrr": false,
                                 "index_only": true,
                                 "rows": 2243,
-                                "cost": 170.53,
+                                "cost": 152.53,
                                 "chosen": false,
                                 "cause": "cost"
                             }
                         ],
                         "index_to_merge": "key1",
-                        "cumulated_cost": 170.53
+                        "cumulated_cost": 152.53
                     },
                     
                     {
@@ -538,7 +537,7 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                                 "using_mrr": false,
                                 "index_only": true,
                                 "rows": 2243,
-                                "cost": 170.53,
+                                "cost": 152.53,
                                 "chosen": true
                             },
                             
@@ -552,16 +551,16 @@ JSON_DETAILED(JSON_EXTRACT(trace, '$**.analyzing_range_alternatives'))
                                 "using_mrr": false,
                                 "index_only": true,
                                 "rows": 2243,
-                                "cost": 170.53,
+                                "cost": 152.53,
                                 "chosen": false,
                                 "cause": "cost"
                             }
                         ],
                         "index_to_merge": "key3",
-                        "cumulated_cost": 341.05
+                        "cumulated_cost": 305.05
                     }
                 ],
-                "cost_of_reading_ranges": 341.05,
+                "cost_of_reading_ranges": 305.05,
                 "use_roworder_union": true,
                 "cause": "always cheaper than non roworder retrieval",
                 "analyzing_roworder_scans": 

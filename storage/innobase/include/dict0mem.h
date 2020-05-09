@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -733,6 +733,9 @@ public:
 				 | CHAR_COLL_MASK << 16
 				 | DATA_LONG_TRUE_VARCHAR));
 	}
+
+  /** @return whether the column values are comparable by memcmp() */
+  inline bool is_binary() const { return prtype & DATA_BINARY_TYPE; }
 };
 
 /** Index information put in a list of virtual column structure. Index
@@ -1246,7 +1249,7 @@ struct dict_index_t {
 	@param[in]	offsets	offsets
 	@return true if row is historical */
 	bool
-	vers_history_row(const rec_t* rec, const offset_t* offsets);
+	vers_history_row(const rec_t* rec, const rec_offs* offsets);
 
 	/** Check if record in secondary index is historical row.
 	@param[in]	rec	record in a secondary index

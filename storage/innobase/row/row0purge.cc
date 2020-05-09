@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2019, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -123,10 +123,10 @@ row_purge_remove_clust_if_poss_low(
 	index->set_modified(mtr);
 
 	rec_t* rec = btr_pcur_get_rec(&node->pcur);
-	offset_t offsets_[REC_OFFS_NORMAL_SIZE];
+	rec_offs offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs_init(offsets_);
 	mem_heap_t* heap = NULL;
-	offset_t* offsets = rec_get_offsets(
+	rec_offs* offsets = rec_get_offsets(
 		rec, index, offsets_, true, ULINT_UNDEFINED, &heap);
 	bool success = true;
 
@@ -804,9 +804,9 @@ static void row_purge_reset_trx_id(purge_node_t* node, mtr_t* mtr)
 		mem_heap_t*	heap = NULL;
 		/* Reserve enough offsets for the PRIMARY KEY and 2 columns
 		so that we can access DB_TRX_ID, DB_ROLL_PTR. */
-		offset_t offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
+		rec_offs offsets_[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS + 2];
 		rec_offs_init(offsets_);
-		offset_t*	offsets = rec_get_offsets(
+		rec_offs*	offsets = rec_get_offsets(
 			rec, index, offsets_, true, trx_id_pos + 2, &heap);
 		ut_ad(heap == NULL);
 
@@ -1198,8 +1198,7 @@ row_purge_record_func(
 			if (node->table->stat_initialized
 			    && srv_stats_include_delete_marked) {
 				dict_stats_update_if_needed(
-					node->table,
-					thr->graph->trx->mysql_thd);
+					node->table, *thr->graph->trx);
 			}
 			MONITOR_INC(MONITOR_N_DEL_ROW_PURGE);
 		}
@@ -1385,7 +1384,7 @@ purge_node_t::validate_pcur()
 
 	dict_index_t*	clust_index = pcur.btr_cur.index;
 
-	offset_t* offsets = rec_get_offsets(
+	rec_offs* offsets = rec_get_offsets(
 		pcur.old_rec, clust_index, NULL, true,
 		pcur.old_n_fields, &heap);
 

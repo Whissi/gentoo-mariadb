@@ -31,14 +31,17 @@ Created June 2005 by Marko Makela
 #include "buf0checksum.h"
 #include "ut0crc32.h"
 #include "zlib.h"
+#include "span.h"
 
-#ifndef UNIV_INNOCHECKSUM
+using st_::span;
 
 /** A BLOB field reference full of zero, for use in assertions and tests.
 Initially, BLOB field references are set to zero, in
 dtuple_convert_big_rec(). */
+alignas(UNIV_PAGE_SIZE_MIN)
 const byte field_ref_zero[UNIV_PAGE_SIZE_MAX] = { 0, };
 
+#ifndef UNIV_INNOCHECKSUM
 #include "mtr0log.h"
 #include "dict0dict.h"
 #include "btr0cur.h"
@@ -869,7 +872,7 @@ page_zip_compress_node_ptrs(
 	mem_heap_t*	heap)		/*!< in: temporary memory heap */
 {
 	int	err	= Z_OK;
-	offset_t* offsets = NULL;
+	rec_offs* offsets = NULL;
 
 	do {
 		const rec_t*	rec = *recs++;
@@ -974,7 +977,7 @@ page_zip_compress_clust_ext(
 	FILE_LOGFILE
 	z_stream*	c_stream,	/*!< in/out: compressed page stream */
 	const rec_t*	rec,		/*!< in: record */
-	const offset_t*	offsets,	/*!< in: rec_get_offsets(rec) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec) */
 	ulint		trx_id_col,	/*!< in: position of of DB_TRX_ID */
 	byte*		deleted,	/*!< in: dense directory entry pointing
 					to the head of the free list */
@@ -1113,7 +1116,7 @@ page_zip_compress_clust(
 	mem_heap_t*	heap)		/*!< in: temporary memory heap */
 {
 	int	err		= Z_OK;
-	offset_t* offsets		= NULL;
+	rec_offs* offsets		= NULL;
 	/* BTR_EXTERN_FIELD_REF storage */
 	byte*	externs		= storage - n_dense
 		* (DATA_TRX_ID_LEN + DATA_ROLL_PTR_LEN);
@@ -1933,7 +1936,7 @@ const byte*
 page_zip_apply_log_ext(
 /*===================*/
 	rec_t*		rec,		/*!< in/out: record */
-	const offset_t*	offsets,	/*!< in: rec_get_offsets(rec) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec) */
 	ulint		trx_id_col,	/*!< in: position of of DB_TRX_ID */
 	const byte*	data,		/*!< in: modification log */
 	const byte*	end)		/*!< in: end of modification log */
@@ -2034,7 +2037,7 @@ page_zip_apply_log(
 				/*!< in: heap_no and status bits for
 				the next record to uncompress */
 	dict_index_t*	index,	/*!< in: index of the page */
-	offset_t*	offsets)/*!< in/out: work area for
+	rec_offs*	offsets)/*!< in/out: work area for
 				rec_get_offsets_reverse() */
 {
 	const byte* const end = data + size;
@@ -2102,7 +2105,7 @@ page_zip_apply_log(
 		if (val & 1) {
 			/* Clear the data bytes of the record. */
 			mem_heap_t*	heap	= NULL;
-			offset_t*	offs;
+			rec_offs*	offs;
 			offs = rec_get_offsets(rec, index, offsets, is_leaf,
 					       ULINT_UNDEFINED, &heap);
 			memset(rec, 0, rec_offs_data_size(offs));
@@ -2256,7 +2259,7 @@ page_zip_decompress_node_ptrs(
 					sorted by address */
 	ulint		n_dense,	/*!< in: size of recs[] */
 	dict_index_t*	index,		/*!< in: the index of the page */
-	offset_t*	offsets,	/*!< in/out: temporary offsets */
+	rec_offs*	offsets,	/*!< in/out: temporary offsets */
 	mem_heap_t*	heap)		/*!< in: temporary memory heap */
 {
 	ulint		heap_status = REC_STATUS_NODE_PTR
@@ -2446,7 +2449,7 @@ page_zip_decompress_sec(
 					sorted by address */
 	ulint		n_dense,	/*!< in: size of recs[] */
 	dict_index_t*	index,		/*!< in: the index of the page */
-	offset_t*	offsets)	/*!< in/out: temporary offsets */
+	rec_offs*	offsets)	/*!< in/out: temporary offsets */
 {
 	ulint	heap_status	= REC_STATUS_ORDINARY
 		| PAGE_HEAP_NO_USER_LOW << REC_HEAP_NO_SHIFT;
@@ -2579,7 +2582,7 @@ page_zip_decompress_clust_ext(
 /*==========================*/
 	z_stream*	d_stream,	/*!< in/out: compressed page stream */
 	rec_t*		rec,		/*!< in/out: record */
-	const offset_t*	offsets,	/*!< in: rec_get_offsets(rec) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec) */
 	ulint		trx_id_col)	/*!< in: position of of DB_TRX_ID */
 {
 	ulint	i;
@@ -2694,7 +2697,7 @@ page_zip_decompress_clust(
 	ulint		n_dense,	/*!< in: size of recs[] */
 	dict_index_t*	index,		/*!< in: the index of the page */
 	ulint		trx_id_col,	/*!< index of the trx_id column */
-	offset_t*	offsets,	/*!< in/out: temporary offsets */
+	rec_offs*	offsets,	/*!< in/out: temporary offsets */
 	mem_heap_t*	heap)		/*!< in: temporary memory heap */
 {
 	int		err;
@@ -2998,7 +3001,7 @@ page_zip_decompress_low(
 	ulint		n_dense;/* number of user records on the page */
 	ulint		trx_id_col = ULINT_UNDEFINED;
 	mem_heap_t*	heap;
-	offset_t*	offsets;
+	rec_offs*	offsets;
 
 	ut_ad(page_zip_simple_validate(page_zip));
 	UNIV_MEM_ASSERT_W(page, srv_page_size);
@@ -3122,7 +3125,7 @@ zlib_error:
 		ulint	n = 1 + 1/* node ptr */ + REC_OFFS_HEADER_SIZE
 			+ dict_index_get_n_fields(index);
 
-		offsets = static_cast<offset_t*>(
+		offsets = static_cast<rec_offs*>(
 			mem_heap_alloc(heap, n * sizeof(ulint)));
 
 		rec_offs_set_n_alloc(offsets, n);
@@ -3362,7 +3365,7 @@ page_zip_validate_low(
 		committed.  Let us tolerate that difference when we
 		are performing a sloppy validation. */
 
-		offset_t*	offsets;
+		rec_offs*	offsets;
 		mem_heap_t*	heap;
 		const rec_t*	rec;
 		const rec_t*	trec;
@@ -3386,11 +3389,12 @@ page_zip_validate_low(
 				differed.  Let us ignore it. */
 				page_zip_fail(("page_zip_validate:"
 					       " min_rec_flag"
-					       " (%s%lu,%lu,0x%02lx)\n",
+					       " (%s" ULINTPF "," ULINTPF
+					       ",0x%02x)\n",
 					       sloppy ? "ignored, " : "",
 					       page_get_space_id(page),
 					       page_get_page_no(page),
-					       (ulong) page[offset]));
+					       page[offset]));
 				/* We don't check for spatial index, since
 				the "minimum record" could be deleted when
 				doing rtr_update_mbr_field.
@@ -3529,7 +3533,7 @@ page_zip_write_rec_ext(
 	const page_t*	page,		/*!< in: page containing rec */
 	const byte*	rec,		/*!< in: record being written */
 	dict_index_t*	index,		/*!< in: record descriptor */
-	const offset_t*	offsets,	/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*	offsets,	/*!< in: rec_get_offsets(rec, index) */
 	ulint		create,		/*!< in: nonzero=insert, zero=update */
 	ulint		trx_id_col,	/*!< in: position of DB_TRX_ID */
 	ulint		heap_no,	/*!< in: heap number of rec */
@@ -3648,7 +3652,7 @@ page_zip_write_rec(
 	page_zip_des_t*	page_zip,/*!< in/out: compressed page */
 	const byte*	rec,	/*!< in: record being written */
 	dict_index_t*	index,	/*!< in: the index the record belongs to */
-	const offset_t*	offsets,/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*	offsets,/*!< in: rec_get_offsets(rec, index) */
 	ulint		create)	/*!< in: nonzero=insert, zero=update */
 {
 	const page_t*	page;
@@ -3892,7 +3896,7 @@ page_zip_write_blob_ptr(
 	const byte*	rec,	/*!< in/out: record whose data is being
 				written */
 	dict_index_t*	index,	/*!< in: index of the page */
-	const offset_t*	offsets,/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*	offsets,/*!< in: rec_get_offsets(rec, index) */
 	ulint		n,	/*!< in: column index */
 	mtr_t*		mtr)	/*!< in: mini-transaction handle,
 				or NULL if no logging is needed */
@@ -4113,7 +4117,7 @@ void
 page_zip_write_trx_id_and_roll_ptr(
 	page_zip_des_t*	page_zip,
 	byte*		rec,
-	const offset_t*	offsets,
+	const rec_offs*	offsets,
 	ulint		trx_id_col,
 	trx_id_t	trx_id,
 	roll_ptr_t	roll_ptr,
@@ -4252,7 +4256,7 @@ page_zip_clear_rec(
 	page_zip_des_t*	page_zip,	/*!< in/out: compressed page */
 	byte*		rec,		/*!< in: record to clear */
 	const dict_index_t*	index,	/*!< in: index of rec */
-	const offset_t*	offsets)	/*!< in: rec_get_offsets(rec, index) */
+	const rec_offs*	offsets)	/*!< in: rec_get_offsets(rec, index) */
 {
 	ulint	heap_no;
 	page_t*	page	= page_align(rec);
@@ -4458,7 +4462,7 @@ page_zip_dir_delete(
 	page_zip_des_t*		page_zip,	/*!< in/out: compressed page */
 	byte*			rec,		/*!< in: deleted record */
 	const dict_index_t*	index,		/*!< in: index of rec */
-	const offset_t*		offsets,	/*!< in: rec_get_offsets(rec) */
+	const rec_offs*		offsets,	/*!< in: rec_get_offsets(rec) */
 	const byte*		free)		/*!< in: previous start of
 						the free list */
 {
@@ -4987,55 +4991,25 @@ page_zip_calc_checksum(
 	return(0);
 }
 
-/** Verify a compressed page's checksum.
-@param[in]	data		compressed page
-@param[in]	size		size of compressed page
-@return whether the stored checksum is valid according to the value of
-innodb_checksum_algorithm */
-bool page_zip_verify_checksum(const void* data, ulint size)
+/** Validate the checksum on a ROW_FORMAT=COMPRESSED page.
+@param data    ROW_FORMAT=COMPRESSED page
+@param size    size of the page, in bytes
+@return whether the stored checksum matches innodb_checksum_algorithm */
+bool page_zip_verify_checksum(const byte *data, size_t size)
 {
-	const uint32_t stored = mach_read_from_4(
-		static_cast<const byte*>(data) + FIL_PAGE_SPACE_OR_CHKSUM);
-
-	compile_time_assert(!(FIL_PAGE_LSN % 8));
-
-	/* Check if page is empty */
-	if (stored == 0
-	    && *reinterpret_cast<const ib_uint64_t*>(static_cast<const char*>(
-		data)
-		+ FIL_PAGE_LSN) == 0) {
-		/* make sure that the page is really empty */
-#ifdef UNIV_INNOCHECKSUM
-		ulint i;
-		for (i = 0; i < size; i++) {
-			if (*((const char*) data + i) != 0)
-				break;
-		}
-		if (i >= size) {
-			if (log_file) {
-			fprintf(log_file, "Page::%llu is empty and"
-					" uncorrupted\n", cur_page_num);
-			}
-
-			return(TRUE);
-		}
-#else
-		for (ulint i = 0; i < size; i++) {
-			if (*((const char*) data + i) != 0) {
-				return(FALSE);
-			}
-		}
-		/* Empty page */
-		return(TRUE);
-#endif /* UNIV_INNOCHECKSUM */
-	}
-
 	const srv_checksum_algorithm_t	curr_algo =
 		static_cast<srv_checksum_algorithm_t>(srv_checksum_algorithm);
 
 	if (curr_algo == SRV_CHECKSUM_ALGORITHM_NONE) {
-		return(TRUE);
+		return true;
 	}
+
+	if (buf_is_zeroes(span<const byte>(data, size))) {
+		return true;
+	}
+
+	const uint32_t stored = mach_read_from_4(
+		data + FIL_PAGE_SPACE_OR_CHKSUM);
 
 	uint32_t calc = page_zip_calc_checksum(data, size, curr_algo);
 
@@ -5051,7 +5025,6 @@ bool page_zip_verify_checksum(const void* data, ulint size)
 	}
 
 	if (!strict_verify) {
-
 		const uint32_t	crc32 = page_zip_calc_checksum(
 			data, size, SRV_CHECKSUM_ALGORITHM_CRC32);
 

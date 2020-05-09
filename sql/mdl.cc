@@ -1215,11 +1215,11 @@ void MDL_lock::Ticket_list::add_ticket(MDL_ticket *ticket)
       wsrep_thd_is_BF(ticket->get_ctx()->get_thd(), false))
   {
     Ticket_iterator itw(ticket->get_lock()->m_waiting);
-
-    DBUG_ASSERT(WSREP_ON);
     MDL_ticket *waiting;
     MDL_ticket *prev=NULL;
     bool added= false;
+
+    DBUG_ASSERT(WSREP(ticket->get_ctx()->get_thd()));
 
     while ((waiting= itw++) && !added)
     {
@@ -3166,19 +3166,14 @@ void MDL_context::set_transaction_duration_for_all_locks()
 
   DBUG_ASSERT(m_tickets[MDL_STATEMENT].is_empty());
 
-  /* Don't swap locks if this thread is running backup stages */
-  if (current_thd->current_backup_stage == BACKUP_FINISHED)
-    m_tickets[MDL_TRANSACTION].swap(m_tickets[MDL_EXPLICIT]);
+  m_tickets[MDL_TRANSACTION].swap(m_tickets[MDL_EXPLICIT]);
 
   Ticket_iterator it_ticket(m_tickets[MDL_EXPLICIT]);
 
   while ((ticket= it_ticket++))
   {
-    if (ticket->get_key()->mdl_namespace() != MDL_key::BACKUP)
-    {
-      m_tickets[MDL_EXPLICIT].remove(ticket);
-      m_tickets[MDL_TRANSACTION].push_front(ticket);
-    }
+    m_tickets[MDL_EXPLICIT].remove(ticket);
+    m_tickets[MDL_TRANSACTION].push_front(ticket);
   }
 
 #ifndef DBUG_OFF

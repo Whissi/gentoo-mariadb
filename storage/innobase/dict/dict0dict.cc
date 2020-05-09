@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -355,7 +355,10 @@ dict_table_close(
 
 		mutex_exit(&dict_sys.mutex);
 
-		if (drop_aborted) {
+		/* dict_table_try_drop_aborted() can generate undo logs.
+		So it should be avoided after shutdown of background
+		threads */
+		if (drop_aborted && !srv_undo_sources) {
 			dict_table_try_drop_aborted(NULL, table_id, 0);
 		}
 	}
@@ -1299,7 +1302,7 @@ dict_table_rename_in_cache(
 			return(DB_OUT_OF_MEMORY);
 		}
 
-		fil_delete_tablespace(table->space_id);
+		fil_delete_tablespace(table->space_id, !table->space);
 
 		/* Delete any temp file hanging around. */
 		if (os_file_status(filepath, &exists, &ftype)
@@ -1836,6 +1839,8 @@ dict_index_add_to_cache(
 			   > field->col->max_prefix) {
 			/* Set the max_prefix value based on the
 			prefix_len. */
+			ut_ad(field->col->is_binary()
+			      || field->prefix_len % field->col->mbmaxlen == 0);
 			field->col->max_prefix = field->prefix_len;
 		}
 		ut_ad(field->col->ord_part == 1);

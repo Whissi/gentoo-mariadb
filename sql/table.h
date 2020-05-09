@@ -1566,6 +1566,7 @@ public:
 
   void init_cost_info_for_usable_range_rowid_filters(THD *thd);
   void prune_range_rowid_filters();
+  void trace_range_rowid_filters(THD *thd) const;
   Range_rowid_filter_cost_info *
   best_range_rowid_filter_for_partial_join(uint access_key_no,
                                            double records,
@@ -2108,6 +2109,9 @@ struct TABLE_LIST
                 OT_BASE_ONLY);
     belong_to_view= belong_to_view_arg;
     trg_event_map= trg_event_map_arg;
+    /* MDL is enough for read-only FK checks, we don't need the table */
+    if (prelocking_type == PRELOCK_FK && lock_type < TL_WRITE_ALLOW_WRITE)
+      open_strategy= OPEN_STUB;
 
     **last_ptr= this;
     prev_global= *last_ptr;

@@ -960,6 +960,7 @@ CREATE TABLE t1 (
 
 INSERT INTO t1 VALUES
   ('B'), ('A'), ('A'), ('C'), ('B'), ('A'), ('A'), ('C'), ('A');
+INSERT INTO t1 VALUES ('X'),('Y'),('Z'),('X1'),('Y1'),('Z1'),('X1'),('Y1'),('Z1');
 
 SELECT a FROM t1 WHERE a='b' OR a='B';
 EXPLAIN SELECT a FROM t1 WHERE a='b' OR a='B';
@@ -1077,7 +1078,7 @@ INSERT INTO t3 VALUES
 # To make range scan compelling to the optimizer
 INSERT INTO t3 SELECT * FROM t3 WHERE a = 10;
 INSERT INTO t3 SELECT * FROM t3 WHERE a = 10;
-
+insert into t1 select -a,b from t1;
 
 #
 # Problem#1 Test queries. Will give missing results unless Problem#1 is fixed.
@@ -1715,6 +1716,22 @@ where (key1varchar='value1' AND (key2int <=1 OR  key2int > 1));
 --echo # The following must show col1=12345 for all rows:
 select * from t1;
 drop table t1;
+
+--echo #
+--echo # MDEV-22191: Range access is not picked when index_merge_sort_union is turned off
+--echo #
+
+set @save_optimizer_switch=@@optimizer_switch;
+set @save_optimizer_switch="index_merge_sort_union=OFF";
+CREATE TABLE t1 (a INT, INDEX(a));
+INSERT INTO t1 VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+explain
+SELECT * FROM t1 WHERE a > 5;
+SELECT * FROM t1 WHERE a > 5;
+set @@optimizer_switch=@save_optimizer_switch;
+drop table t1;
+
+--echo # End of 5.5 tests
 
 --echo #
 --echo # BUG#13731380: RANGE OPTIMIZER CALLS RECORDS_IN_RANGE() FOR OPEN RANGE

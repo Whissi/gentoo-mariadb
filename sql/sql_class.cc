@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2019, MariaDB Corporation.
+   Copyright (c) 2008, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -608,6 +608,7 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
    m_current_stage_key(0),
    in_sub_stmt(0), log_all_errors(0),
    binlog_unsafe_warning_flags(0),
+   current_stmt_binlog_format(BINLOG_FORMAT_MIXED),
    binlog_table_maps(0),
    bulk_param(0),
    table_map_for_update(0),
@@ -765,7 +766,7 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
   query_name_consts= 0;
   semisync_info= 0;
   db_charset= global_system_variables.collation_database;
-  bzero(ha_data, sizeof(ha_data));
+  bzero((void*) ha_data, sizeof(ha_data));
   mysys_var=0;
   binlog_evt_union.do_union= FALSE;
   enable_slow_log= 0;
@@ -2205,11 +2206,6 @@ void THD::reset_globals()
   net.thd= 0;
 }
 
-bool THD::trace_started()
-{
-  return opt_trace.is_started();
-}
-
 /*
   Cleanup after query.
 
@@ -3007,7 +3003,8 @@ int select_send::send_data(List<Item> &items)
 
   thd->inc_sent_row_count(1);
 
-  if (thd->vio_ok())
+  /* Don't return error if disconnected, only if write fails */
+  if (likely(thd->vio_ok()))
     DBUG_RETURN(protocol->write());
 
   DBUG_RETURN(0);
@@ -5580,6 +5577,7 @@ void THD::leave_locked_tables_mode()
 {
   if (locked_tables_mode == LTM_LOCK_TABLES)
   {
+    DBUG_ASSERT(current_backup_stage == BACKUP_FINISHED);
     /*
       When leaving LOCK TABLES mode we have to change the duration of most
       of the metadata locks being held, except for HANDLER and GRL locks,
@@ -6115,7 +6113,7 @@ int THD::decide_logging_format(TABLE_LIST *tables)
             /* As all updated tables are temporary, nothing will be logged */
             set_current_stmt_binlog_format_row();
           }
-          else if (IF_WSREP((!WSREP(this) ||
+          else if (IF_WSREP((!WSREP_NNULL(this) ||
                              wsrep_cs().mode() ==
                              wsrep::client_state::m_local),1))
 	  {

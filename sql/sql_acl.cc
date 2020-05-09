@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB Corporation.
+   Copyright (c) 2009, 2020, MariaDB Corporation.
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -62,11 +62,13 @@
 bool mysql_user_table_is_in_short_password_format= false;
 bool using_global_priv_table= true;
 
+#ifndef NO_EMBEDDED_ACCESS_CHECKS
 // set that from field length in acl_load?
 const uint max_hostname_length= 60;
 const uint max_dbname_length= 64;
 
 #include "sql_acl_getsort.ic"
+#endif
 
 static LEX_CSTRING native_password_plugin_name= {
   STRING_WITH_LEN("mysql_native_password")
@@ -1423,9 +1425,12 @@ class User_table_json: public User_table
 
   bool set_auth(const ACL_USER &u) const
   {
-    StringBuffer<JSON_SIZE> json(m_table->field[2]->charset());
-    if (u.nauth == 1)
+    size_t array_len;
+    const char *array;
+    if (u.nauth == 1 && get_value("auth_or", JSV_ARRAY, &array, &array_len))
       return set_auth1(u, 0);
+
+    StringBuffer<JSON_SIZE> json(m_table->field[2]->charset());
     bool top_done = false;
     json.append('[');
     for (uint i=0; i < u.nauth; i++)
@@ -1842,10 +1847,13 @@ class Grant_tables
     int res= really_open(thd, first, &counter);
 
     /* if User_table_json wasn't found, let's try User_table_tabular */
-    if (!res && (which_tables & Table_user) && !(tables[USER_TABLE].table))
+    if (!res && (which_tables & Table_user) && !tables[USER_TABLE].table)
     {
       uint unused;
       TABLE_LIST *tl= tables + USER_TABLE;
+      TABLE *backup_open_tables= thd->open_tables;
+      thd->set_open_tables(NULL);
+
       tl->init_one_table(&MYSQL_SCHEMA_NAME, &MYSQL_TABLE_NAME_USER,
                          NULL, lock_type);
       tl->open_type= OT_BASE_ONLY;
@@ -1854,6 +1862,12 @@ class Grant_tables
       p_user_table= &m_user_table_tabular;
       counter++;
       res= really_open(thd, tl, &unused);
+      thd->set_open_tables(backup_open_tables);
+      if (tables[USER_TABLE].table)
+      {
+        tables[USER_TABLE].table->next= backup_open_tables;
+        thd->set_open_tables(tables[USER_TABLE].table);
+      }
     }
     if (res)
       DBUG_RETURN(res);
@@ -8688,13 +8702,12 @@ static void add_user_option(String *grant, double value, const char *name)
   }
 }
 
-static void add_user_parameters(String *result, ACL_USER* acl_user,
+static void add_user_parameters(THD *thd, String *result, ACL_USER* acl_user,
                                 bool with_grant)
 {
-  result->append(STRING_WITH_LEN("@'"));
-  result->append(acl_user->host.hostname, acl_user->hostname_length,
-                system_charset_info);
-  result->append('\'');
+  result->append('@');
+  append_identifier(thd, result, acl_user->host.hostname,
+                    acl_user->hostname_length);
 
   if (acl_user->nauth == 1 &&
       (acl_user->auth->plugin.str == native_password_plugin_name.str ||
@@ -8885,11 +8898,9 @@ bool mysql_show_create_user(THD *thd, LEX_USER *lex_user)
     goto end;
   }
 
-  result.append("CREATE USER '");
-  result.append(username);
-  result.append('\'');
-
-  add_user_parameters(&result, acl_user, false);
+  result.append("CREATE USER ");
+  append_identifier(thd, &result, username, strlen(username));
+  add_user_parameters(thd, &result, acl_user, false);
 
   if (acl_user->password_expired)
     result.append(STRING_WITH_LEN(" PASSWORD EXPIRE"));
@@ -9148,17 +9159,14 @@ static bool show_role_grants(THD *thd, const char *username,
     grant.append(STRING_WITH_LEN("GRANT "));
     ACL_ROLE *acl_role= *(dynamic_element(&acl_entry->role_grants, counter,
                                           ACL_ROLE**));
-    grant.append(acl_role->user.str, acl_role->user.length,
-                  system_charset_info);
-    grant.append(STRING_WITH_LEN(" TO '"));
-    grant.append(acl_entry->user.str, acl_entry->user.length,
-                  system_charset_info);
+    append_identifier(thd, &grant, acl_role->user.str, acl_role->user.length);
+    grant.append(STRING_WITH_LEN(" TO "));
+    append_identifier(thd, &grant, acl_entry->user.str, acl_entry->user.length);
     if (!(acl_entry->flags & IS_ROLE))
     {
-      grant.append(STRING_WITH_LEN("'@'"));
-      grant.append(&host);
+      grant.append('@');
+      append_identifier(thd, &grant, host.str, host.length);
     }
-    grant.append('\'');
 
     ROLE_GRANT_PAIR *pair=
       find_role_grant_pair(&acl_entry->user, &host, &acl_role->user);
@@ -9212,13 +9220,12 @@ static bool show_global_privileges(THD *thd, ACL_USER_BASE *acl_entry,
       }
     }
   }
-  global.append (STRING_WITH_LEN(" ON *.* TO '"));
-  global.append(acl_entry->user.str, acl_entry->user.length,
-                system_charset_info);
-  global.append('\'');
+  global.append (STRING_WITH_LEN(" ON *.* TO "));
+  append_identifier(thd, &global, acl_entry->user.str, acl_entry->user.length);
 
   if (!handle_as_role)
-    add_user_parameters(&global, (ACL_USER *)acl_entry, (want_access & GRANT_ACL));
+    add_user_parameters(thd, &global, (ACL_USER *)acl_entry,
+                        (want_access & GRANT_ACL));
 
   protocol->prepare_for_resend();
   protocol->store(global.ptr(),global.length(),global.charset());
@@ -9228,6 +9235,21 @@ static bool show_global_privileges(THD *thd, ACL_USER_BASE *acl_entry,
   return FALSE;
 
 }
+
+
+static void add_to_user(THD *thd, String *result, const char *user,
+                        bool is_user, const char *host)
+{
+  result->append(STRING_WITH_LEN(" TO "));
+  append_identifier(thd, result, user, strlen(user));
+  if (is_user)
+  {
+    result->append('@');
+    // host and lex_user->host are equal except for case
+    append_identifier(thd, result, host, strlen(host));
+  }
+}
+
 
 static bool show_database_privileges(THD *thd, const char *username,
                                      const char *hostname,
@@ -9289,16 +9311,8 @@ static bool show_database_privileges(THD *thd, const char *username,
         }
         db.append (STRING_WITH_LEN(" ON "));
         append_identifier(thd, &db, acl_db->db, strlen(acl_db->db));
-        db.append (STRING_WITH_LEN(".* TO '"));
-        db.append(username, strlen(username),
-                  system_charset_info);
-        if (*hostname)
-        {
-          db.append (STRING_WITH_LEN("'@'"));
-          // host and lex_user->host are equal except for case
-          db.append(host, strlen(host), system_charset_info);
-        }
-        db.append ('\'');
+        db.append (STRING_WITH_LEN(".*"));
+        add_to_user(thd, &db, username, (*hostname), host);
         if (want_access & GRANT_ACL)
           db.append(STRING_WITH_LEN(" WITH GRANT OPTION"));
         protocol->prepare_for_resend();
@@ -9429,16 +9443,7 @@ static bool show_table_and_column_privileges(THD *thd, const char *username,
         global.append('.');
         append_identifier(thd, &global, grant_table->tname,
                           strlen(grant_table->tname));
-        global.append(STRING_WITH_LEN(" TO '"));
-        global.append(username, strlen(username),
-                      system_charset_info);
-        if (*hostname)
-        {
-          global.append(STRING_WITH_LEN("'@'"));
-          // host and lex_user->host are equal except for case
-          global.append(host, strlen(host), system_charset_info);
-        }
-        global.append('\'');
+        add_to_user(thd, &global, username, (*hostname), host);
         if (table_access & GRANT_ACL)
           global.append(STRING_WITH_LEN(" WITH GRANT OPTION"));
         protocol->prepare_for_resend();
@@ -9524,16 +9529,7 @@ static int show_routine_grants(THD* thd,
 	global.append('.');
 	append_identifier(thd, &global, grant_proc->tname,
 			  strlen(grant_proc->tname));
-	global.append(STRING_WITH_LEN(" TO '"));
-        global.append(username, strlen(username),
-		      system_charset_info);
-        if (*hostname)
-        {
-          global.append(STRING_WITH_LEN("'@'"));
-          // host and lex_user->host are equal except for case
-          global.append(host, strlen(host), system_charset_info);
-        }
-	global.append('\'');
+        add_to_user(thd, &global, username, (*hostname), host);
 	if (proc_access & GRANT_ACL)
 	  global.append(STRING_WITH_LEN(" WITH GRANT OPTION"));
 	protocol->prepare_for_resend();

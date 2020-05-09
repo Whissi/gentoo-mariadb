@@ -353,8 +353,10 @@ bool dbug_user_var_equals_int(THD *thd, const char *name, int value)
 static void trace_table_dependencies(THD *thd,
                                      JOIN_TAB *join_tabs, uint table_count)
 {
+  DBUG_ASSERT(thd->trace_started());
   Json_writer_object trace_wrapper(thd);
   Json_writer_array trace_dep(thd, "table_dependencies");
+
   for (uint i= 0; i < table_count; i++)
   {
     TABLE_LIST *table_ref= join_tabs[i].tab_list;
@@ -1469,6 +1471,7 @@ JOIN::prepare(TABLE_LIST *tables_init,
     }
   }
 
+  if (thd->trace_started())
   {
     Json_writer_object trace_wrapper(thd);
     opt_trace_print_expanded_query(thd, select_lex, &trace_wrapper);
@@ -2955,8 +2958,12 @@ int JOIN::optimize_stage2()
     having_is_correlated= MY_TEST(having->used_tables() & OUTER_REF_TABLE_BIT);
   tmp_having= having;
 
-  if ((select_lex->options & OPTION_SCHEMA_TABLE))
-    optimize_schema_tables_reads(this);
+  if ((select_lex->options & OPTION_SCHEMA_TABLE) &&
+       optimize_schema_tables_reads(this))
+    DBUG_RETURN(TRUE);
+
+  if (unlikely(thd->is_error()))
+    DBUG_RETURN(TRUE);
 
   /*
     The loose index scan access method guarantees that all grouping or
@@ -5352,6 +5359,7 @@ make_join_statistics(JOIN *join, List<TABLE_LIST> &tables_list,
   {
     Json_writer_object rows_estimation_wrapper(thd);
     Json_writer_array rows_estimation(thd, "rows_estimation");
+
     for (s=stat ; s < stat_end ; s++)
     {
       s->startup_cost= 0;
@@ -5496,10 +5504,16 @@ make_join_statistics(JOIN *join, List<TABLE_LIST> &tables_list,
         if (select)
           delete select;
         else
-          add_table_scan_values_to_trace(thd, s);
+        {
+          if (thd->trace_started())
+            add_table_scan_values_to_trace(thd, s);
+        }
       }
       else
-        add_table_scan_values_to_trace(thd, s);
+      {
+        if (thd->trace_started())
+          add_table_scan_values_to_trace(thd, s);
+      }
     }
   }
 
@@ -5567,7 +5581,7 @@ make_join_statistics(JOIN *join, List<TABLE_LIST> &tables_list,
       for (i= 0; i < join->table_count ; i++)
         if (double rr= join->best_positions[i].records_read)
           records= COST_MULT(records, rr);
-      ha_rows rows= records > HA_ROWS_MAX ? HA_ROWS_MAX : (ha_rows) records;
+      ha_rows rows= records > (double) HA_ROWS_MAX ? HA_ROWS_MAX : (ha_rows) records;
       set_if_smaller(rows, unit->select_limit_cnt);
       join->select_lex->increase_derived_records(rows);
     }
@@ -7402,7 +7416,7 @@ best_access_path(JOIN      *join,
 
       Json_writer_object trace_access_idx(thd);
       /*
-        ft-keys require special treatment
+        full text keys require special treatment
       */
       if (ft_key)
       {
@@ -7414,7 +7428,7 @@ best_access_path(JOIN      *join,
         records= 1.0;
         type= JT_FT;
         trace_access_idx.add("access_type", join_type_str[type])
-                        .add("index", keyinfo->name);
+                        .add("full-text index", keyinfo->name);
       }
       else
       {
@@ -7744,6 +7758,8 @@ best_access_path(JOIN      *join,
           filter->get_cmp_gain(rows);
           tmp-= filter->get_adjusted_gain(rows) - filter->get_cmp_gain(rows);
           DBUG_ASSERT(tmp >= 0);
+          trace_access_idx.add("rowid_filter_key",
+                               s->table->key_info[filter->key_no].name);
         }
       }
       trace_access_idx.add("rows", records).add("cost", tmp);
@@ -10662,6 +10678,7 @@ static bool create_ref_for_key(JOIN *join, JOIN_TAB *j,
   uchar *key_buff=j->ref.key_buff, *null_ref_key= 0;
   uint null_ref_part= NO_REF_PART;
   bool keyuse_uses_no_tables= TRUE;
+  uint not_null_keyparts= 0;
   if (ftkey)
   {
     j->ref.items[0]=((Item_func*)(keyuse->val))->key_item();
@@ -10691,6 +10708,8 @@ static bool create_ref_for_key(JOIN *join, JOIN_TAB *j,
       j->ref.items[i]=keyuse->val;		// Save for cond removal
       j->ref.cond_guards[i]= keyuse->cond_guard;
 
+      if (!keyuse->val->maybe_null || keyuse->null_rejecting)
+        not_null_keyparts++;
       /*
         Set ref.null_rejecting to true only if we are going to inject a
         "keyuse->val IS NOT NULL" predicate.
@@ -10750,12 +10769,18 @@ static bool create_ref_for_key(JOIN *join, JOIN_TAB *j,
   ulong key_flags= j->table->actual_key_flags(keyinfo);
   if (j->type == JT_CONST)
     j->table->const_table= 1;
-  else if (!((keyparts == keyinfo->user_defined_key_parts && 
-              ((key_flags & (HA_NOSAME | HA_NULL_PART_KEY)) == HA_NOSAME)) ||
-	     (keyparts > keyinfo->user_defined_key_parts &&   // true only for extended keys 
-              MY_TEST(key_flags & HA_EXT_NOSAME) &&
-              keyparts == keyinfo->ext_key_parts)) ||
-	    null_ref_key)
+  else if (!((keyparts == keyinfo->user_defined_key_parts &&
+              (
+                (key_flags & (HA_NOSAME | HA_NULL_PART_KEY)) == HA_NOSAME ||
+                /* Unique key and all keyparts are NULL rejecting */
+                ((key_flags & HA_NOSAME) && keyparts == not_null_keyparts)
+              )) ||
+              /* true only for extended keys */
+              (keyparts > keyinfo->user_defined_key_parts &&
+               MY_TEST(key_flags & HA_EXT_NOSAME) &&
+               keyparts == keyinfo->ext_key_parts)
+            ) ||
+            null_ref_key)
   {
     /* Must read with repeat */
     j->type= null_ref_key ? JT_REF_OR_NULL : JT_REF;
@@ -11866,18 +11891,21 @@ make_join_select(JOIN *join,SQL_SELECT *select,COND *cond)
         i++;
     }
 
-    trace_attached_comp.end();
-    Json_writer_array trace_attached_summary(thd,
-                                           "attached_conditions_summary");
-    for (tab= first_depth_first_tab(join); tab;
-          tab= next_depth_first_tab(join, tab))
+    if (unlikely(thd->trace_started()))
     {
-      if (!tab->table)
-       continue;
-      Item *const cond = tab->select_cond;
-      Json_writer_object trace_one_table(thd);
-      trace_one_table.add_table_name(tab);
-      trace_one_table.add("attached", cond);
+      trace_attached_comp.end();
+      Json_writer_array trace_attached_summary(thd,
+                                               "attached_conditions_summary");
+      for (tab= first_depth_first_tab(join); tab;
+           tab= next_depth_first_tab(join, tab))
+      {
+        if (!tab->table)
+          continue;
+        Item *const cond = tab->select_cond;
+        Json_writer_object trace_one_table(thd);
+        trace_one_table.add_table_name(tab);
+        trace_one_table.add("attached", cond);
+      }
     }
   }
   DBUG_RETURN(0);
