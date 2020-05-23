@@ -348,7 +348,7 @@ struct st_mysql_options {
     struct st_mysql_options options;
     enum mysql_status status;
     my_bool	free_me;		/* If free in mysql_close */
-    my_bool	unused_1;
+    my_bool	reconnect;
     char	        scramble_buff[20+ 1];
     /* madded after 3.23.58 */
     my_bool       unused_2;
