@@ -322,18 +322,24 @@ ELSE()
   # On Unix, most of the files end up in the bin directory
   SET(BIN_SCRIPTS
     msql2mysql
-    mariadb-setpermission
-    mariadb-secure-installation
-    mariadb-access
-    mariadb-convert-table-format
-    mariadb-find-rows
-    mysql_config
+    mysql_setpermission
+    mysql_secure_installation
+    mysqlaccess
+    mysql_convert_table_format
+    mysql_find_rows
     mytop
     mariadb-hotcopy
     ${SERVER_SCRIPTS}
     ${WSREP_SCRIPTS}
     ${SYSTEMD_SCRIPTS}
   )
+
+  IF(NOT WITHOUT_CLIENTLIBS)
+    SET(BIN_SCRIPTS
+      ${BIN_SCRIPTS}
+      mysql_config
+    )
+  ENDIF(NOT WITHOUT_CLIENTLIBS)
 
   FOREACH(file ${BIN_SCRIPTS})
     # set name of executable
