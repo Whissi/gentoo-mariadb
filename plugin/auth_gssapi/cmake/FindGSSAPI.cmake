@@ -39,6 +39,29 @@ if(GSSAPI_LIBS AND GSSAPI_FLAVOR)
 
 else(GSSAPI_LIBS AND GSSAPI_FLAVOR)
 
+  find_package(PkgConfig)
+  IF(PKG_CONFIG_FOUND)
+    pkg_check_modules(GSSAPI mit-krb5-gssapi mit-krb5)
+    IF(GSSAPI_FOUND)
+      set(GSSAPI_FLAVOR "MIT")
+    ELSE()
+      pkg_check_modules(GSSAPI heimdal-gssapi heimdal-krb5)
+      IF(GSSAPI_FOUND)
+        set(GSSAPI_FLAVOR "HEIMDAL")
+      ENDIF()
+    ENDIF()
+    IF(GSSAPI_FOUND)
+      message(STATUS "Found GSSAPI: ${GSSAPI_LIBRARIES}")
+
+      set(GSSAPI_INCS ${GSSAPI_INCLUDE_DIRS} CACHE STRING "" FORCE)
+      set(GSSAPI_LIBS ${GSSAPI_LIBRARIES} CACHE STRING "" FORCE)
+      set(GSSAPI_FLAVOR ${GSSAPI_FLAVOR} CACHE STRING "" FORCE)
+
+      mark_as_advanced(GSSAPI_INCS GSSAPI_LIBS GSSAPI_FLAVOR)
+      RETURN()
+    ENDIF()
+  ENDIF(PKG_CONFIG_FOUND)
+
   find_program(KRB5_CONFIG NAMES krb5-config heimdal-krb5-config PATHS
      /opt/local/bin /usr/lib/mit/bin
      ONLY_CMAKE_FIND_ROOT_PATH               # this is required when cross compiling with cmake 2.6 and ignored with cmake 2.4, Alex
