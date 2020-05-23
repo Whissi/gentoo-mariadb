@@ -296,7 +296,6 @@ ELSE()
   # On Unix, most of the files end up in the bin directory
   SET(BIN_SCRIPTS
     msql2mysql
-    mysql_config
     mysql_setpermission
     mysql_secure_installation
     mysqlaccess
@@ -308,6 +307,12 @@ ELSE()
     ${WSREP_SCRIPTS}
     ${SYSTEMD_SCRIPTS}
   )
+  IF(NOT WITHOUT_CLIENTLIBS)
+    SET(BIN_SCRIPTS
+      ${BIN_SCRIPTS}
+      mysql_config
+    )
+  ENDIF(NOT WITHOUT_CLIENTLIBS)
   FOREACH(file ${BIN_SCRIPTS})
     IF(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${file}.sh)
       CONFIGURE_FILE(${CMAKE_CURRENT_SOURCE_DIR}/${file}.sh
