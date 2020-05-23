@@ -46,10 +46,15 @@ ADD_CUSTOM_TARGET(GenError
                   DEPENDS 
                   ${CMAKE_BINARY_DIR}/include/mysqld_error.h.tmp)
 
+IF(NOT WITHOUT_CLIENTLIBS)
 MYSQL_ADD_EXECUTABLE(my_print_defaults my_print_defaults.c)
+MYSQL_ADD_EXECUTABLE(perror perror.c)
+ELSE(NOT WITHOUT_CLIENTLIBS)
+ADD_EXECUTABLE(my_print_defaults my_print_defaults.c)
+ADD_EXECUTABLE(perror perror.c)
+ENDIF(NOT WITHOUT_CLIENTLIBS)
 TARGET_LINK_LIBRARIES(my_print_defaults  mysys)
 
-MYSQL_ADD_EXECUTABLE(perror perror.c)
 ADD_DEPENDENCIES(perror GenError)
 TARGET_LINK_LIBRARIES(perror mysys)
 
