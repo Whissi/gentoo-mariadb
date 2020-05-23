@@ -288,10 +288,10 @@ then
   print_defaults="$builddir/extra/my_print_defaults"
 elif test -n "$basedir"
 then
-  print_defaults=`find_in_dirs my_print_defaults $basedir/bin $basedir/extra`
+  print_defaults=`find_in_dirs my_print_defaults $basedir/libexec/mariadb $basedir/bin $basedir/extra`
   if test -z "$print_defaults"
   then
-    cannot_find_file my_print_defaults $basedir/bin $basedir/extra
+    cannot_find_file my_print_defaults $basedir/libexec/mariadb $basedir/bin $basedir/extra
     exit 1
   fi
 elif test -n "$dirname0" -a -x "$dirname0/@bindir@/my_print_defaults"
