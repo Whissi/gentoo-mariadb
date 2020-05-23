@@ -272,6 +272,7 @@ fi
 SCRIPTS_DIR="$(cd $(dirname "$0"); pwd -P)"
 EXTRA_DIR="$SCRIPTS_DIR/../extra"
 CLIENT_DIR="$SCRIPTS_DIR/../client"
+LIBEXEC_DIR="$SCRIPTS_DIR/../libexec/mariadb"
 
 if [ -x "$CLIENT_DIR/mysql" ]; then
     MYSQL_CLIENT="$CLIENT_DIR/mysql"
@@ -285,7 +286,9 @@ else
     MYSQLDUMP=$(which mysqldump)
 fi
 
-if [ -x "$SCRIPTS_DIR/my_print_defaults" ]; then
+if [ -x "$LIBEXEC_DIR/my_print_defaults" ]; then
+    MY_PRINT_DEFAULTS="$LIBEXEC_DIR/my_print_defaults"
+elif [ -x "$SCRIPTS_DIR/my_print_defaults" ]; then
     MY_PRINT_DEFAULTS="$SCRIPTS_DIR/my_print_defaults"
 elif [ -x "$EXTRA_DIR/my_print_defaults" ]; then
     MY_PRINT_DEFAULTS="$EXTRA_DIR/my_print_defaults"
