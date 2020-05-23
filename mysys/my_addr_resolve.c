@@ -74,11 +74,20 @@ int my_addr_resolve(void *ptr, my_addr_loc *loc)
   {
     bfd_vma start;
 
+#ifdef bfd_get_section_flags
     if ((bfd_get_section_flags(bfdh, sec) & SEC_ALLOC) == 0)
+#else
+    if ((bfd_section_flags(sec) & SEC_ALLOC) == 0)
+#endif
       continue;
 
+#ifdef bfd_get_section_vma
     start = bfd_get_section_vma(bfdh, sec);
     if (addr < start || addr >= start + bfd_get_section_size(sec))
+#else
+    start = bfd_section_vma(sec);
+    if (addr < start || addr >= start + bfd_section_size(sec))
+#endif
       continue;
 
     if (bfd_find_nearest_line(bfdh, sec, symtable, addr - start,
