@@ -371,6 +371,11 @@ IF(CMAKE_SYSTEM_NAME MATCHES "Linux")
     strmake
     strmake_root
     strxmov
+    my_thread_end_wait_time
+    insert_dynamic
+    delete_dynamic_element
+    my_qsort
+    allocate_dynamic
 
     # pam_mysql.so
     make_scrambled_password
