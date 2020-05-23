@@ -105,7 +105,13 @@ EOF
 }
 
 find_in_bin() {
-  if test -x "$MY_BASEDIR_VERSION/bin/$1"
+  if test -x "$MY_BASEDIR_VERSION/libexec/mariadb/$1"
+  then
+    echo "$MY_BASEDIR_VERSION/libexec/mariadb/$1"
+  elif test -x "@bindir@/../libexec/mariadb/$1"
+  then
+    echo "@bindir@/../libexec/mariadb/$1"
+  elif test -x "$MY_BASEDIR_VERSION/$1"
   then
     echo "$MY_BASEDIR_VERSION/bin/$1"
   elif test -x "@bindir@/$1"
