@@ -92,6 +92,10 @@ plugindir='@pkgplugindir@'
 plugindir_rel=`echo $plugindir | sed -e "s;^$basedir/;;"`
 fix_path plugindir $plugindir_rel @libsubdir@/mysql/plugin @libsubdir@/plugin
 
+elibdir='@elibdir@'
+elibdir_rel=`echo $elibdir | sed -e "s;^$basedir/;;"`
+fix_path elibdir $elibdir_rel @libsubdir@/mysql @libsubdir@
+
 pkgincludedir='@pkgincludedir@'
 fix_path pkgincludedir include/mysql
 
@@ -106,7 +110,7 @@ fi
 
 # Create options 
 libs="-L$pkglibdir @RPATH_OPTION@ @LIBS_FOR_CLIENTS@"
-embedded_libs="-L$pkglibdir @RPATH_OPTION@ @EMB_LIBS_FOR_CLIENTS@"
+embedded_libs="-L$elibdir @RPATH_OPTION@ @EMB_LIBS_FOR_CLIENTS@"
 
 include="-I$pkgincludedir"
 if [ "$basedir" != "/usr" ]; then

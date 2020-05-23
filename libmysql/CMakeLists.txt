@@ -457,9 +457,14 @@ ADD_DEPENDENCIES(clientlib GenError)
 
 SET(LIBS clientlib dbug strings vio mysys mysys_ssl ${ZLIB_LIBRARY} ${SSL_LIBRARIES} ${LIBDL})
 
+SET(INSTALL_STATIC_LIBS "")
+IF(NOT ENABLE_STATIC_LIBS)
+  SET(INSTALL_STATIC_LIBS "NOINSTALL")
+ENDIF()
+
 # Merge several convenience libraries into one big mysqlclient
 # and link them together into shared library.
-MERGE_LIBRARIES(mysqlclient STATIC ${LIBS} COMPONENT Development)
+MERGE_LIBRARIES(mysqlclient STATIC ${LIBS} COMPONENT Development OUTPUT_DIR ${INSTALL_LIBDIR} ${INSTALL_STATIC_LIBS})
 
 # Visual Studio users need debug  static library for debug projects
 IF(MSVC)
@@ -479,7 +484,9 @@ IF(UNIX)
       SET(${OUTNAME} ${LIBNAME}${EXTENSION}${DOT_VERSION})
     ENDIF() 
   ENDMACRO()
-  INSTALL_SYMLINK(${CMAKE_STATIC_LIBRARY_PREFIX}mysqlclient_r.a mysqlclient ${INSTALL_LIBDIR} Development)
+  IF(ENABLE_STATIC_LIBS)
+    INSTALL_SYMLINK(${CMAKE_STATIC_LIBRARY_PREFIX}mysqlclient_r.a mysqlclient ${INSTALL_LIBDIR} Development)
+  ENDIF()
 ENDIF()
 
 IF(NOT DISABLE_SHARED)

@@ -44,7 +44,8 @@
 # - INSTALL_SYSCONFDIR	    (my.cnf config file. Usually /etc or nothing)
 # - INSTALL_SYSCONF2DIR     (additional config files, e.g. /etc/mysql/conf.d)
 #
-# - INSTALL_LIBDIR          (directory with client end embedded libraries)
+# - INSTALL_LIBDIR          (directory with client libraries)
+# - INSTALL_ELIBDIR         (directory with embedded libraries)
 # - INSTALL_PLUGINDIR       (directory for plugins)
 #
 # - INSTALL_INCLUDEDIR      (directory for MySQL headers)
@@ -110,6 +111,7 @@ SET(INSTALL_SBINDIR_STANDALONE          "bin")
 SET(INSTALL_SCRIPTDIR_STANDALONE        "scripts")
 #
 SET(INSTALL_LIBDIR_STANDALONE           "lib")
+SET(INSTALL_ELIBDIR_STANDALONE          "lib")
 SET(INSTALL_PLUGINDIR_STANDALONE        "lib/plugin")
 #
 SET(INSTALL_INCLUDEDIR_STANDALONE       "include/mysql")
@@ -139,9 +141,11 @@ SET(INSTALL_SYSCONF2DIR_RPM             "/etc/my.cnf.d")
 #
 IF(CMAKE_SIZEOF_VOID_P EQUAL 8)
   SET(INSTALL_LIBDIR_RPM                "lib64")
+  SET(INSTALL_ELIBDIR_RPM               "lib64")
   SET(INSTALL_PLUGINDIR_RPM             "lib64/mysql/plugin")
 ELSE()
   SET(INSTALL_LIBDIR_RPM                "lib")
+  SET(INSTALL_ELIBDIR_RPM               "lib")
   SET(INSTALL_PLUGINDIR_RPM             "lib/mysql/plugin")
 ENDIF()
 #
@@ -174,6 +178,7 @@ SET(INSTALL_SCRIPTDIR_DEB               "bin")
 SET(INSTALL_SYSCONF2DIR_DEB             "/etc/mysql/conf.d")
 #
 SET(INSTALL_LIBDIR_DEB                  "lib")
+SET(INSTALL_ELIBDIR_DEB                 "lib")
 SET(INSTALL_PLUGINDIR_DEB               "lib/mysql/plugin")
 #
 SET(INSTALL_INCLUDEDIR_DEB              "include/mysql")
@@ -204,6 +209,7 @@ SET(INSTALL_SBINDIR_SVR4                "bin")
 SET(INSTALL_SCRIPTDIR_SVR4              "scripts")
 #
 SET(INSTALL_LIBDIR_SVR4                 "lib")
+SET(INSTALL_ELIBDIR_SVR4                "lib")
 SET(INSTALL_PLUGINDIR_SVR4              "lib/plugin")
 #
 SET(INSTALL_INCLUDEDIR_SVR4             "include/mysql")
@@ -234,7 +240,7 @@ SET(OLD_INSTALL_LAYOUT ${INSTALL_LAYOUT} CACHE INTERNAL "")
 # Set INSTALL_FOODIR variables for chosen layout (for example, INSTALL_BINDIR
 # will be defined  as ${INSTALL_BINDIR_STANDALONE} by default if STANDALONE
 # layout is chosen)
-FOREACH(var BIN SBIN LIB MYSQLSHARE SHARE PLUGIN INCLUDE SCRIPT DOC MAN SYSCONF SYSCONF2
+FOREACH(var BIN SBIN LIB ELIB MYSQLSHARE SHARE PLUGIN INCLUDE SCRIPT DOC MAN SYSCONF SYSCONF2
     INFO MYSQLTEST SQLBENCH DOCREADME SUPPORTFILES MYSQLDATA UNIX_ADDR
     SYSTEMD_UNIT SYSTEMD_SYSUSERS SYSTEMD_TMPFILES)
   SET(INSTALL_${var}DIR  ${INSTALL_${var}DIR_${INSTALL_LAYOUT}}
