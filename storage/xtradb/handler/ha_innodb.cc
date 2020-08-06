@@ -4678,16 +4678,7 @@ innobase_commit_low(
 #ifdef WITH_WSREP
 	const char* tmp = 0;
 	if (trx->is_wsrep()) {
-#ifdef WSREP_PROC_INFO
-		char info[64];
-		info[sizeof(info) - 1] = '\0';
-		snprintf(info, sizeof(info) - 1,
-			 "innobase_commit_low():trx_commit_for_mysql(%lld)",
-			 (long long) wsrep_thd_trx_seqno(trx->mysql_thd));
-		tmp = thd_proc_info(trx->mysql_thd, info);
-#else
 		tmp = thd_proc_info(trx->mysql_thd, "innobase_commit_low()");
-#endif /* WSREP_PROC_INFO */
 	}
 #endif /* WITH_WSREP */
 	if (trx_is_started(trx)) {
@@ -19457,11 +19448,14 @@ static
 void
 innodb_status_output_update(THD*,st_mysql_sys_var*,void*var,const void*save)
 {
-	*static_cast<my_bool*>(var) = *static_cast<const my_bool*>(save);
-	mysql_mutex_unlock(&LOCK_global_system_variables);
-	/* Wakeup server monitor thread. */
-	os_event_set(srv_monitor_event);
-	mysql_mutex_lock(&LOCK_global_system_variables);
+  *static_cast<my_bool*>(var)= *static_cast<const my_bool*>(save);
+  if (srv_monitor_event)
+  {
+    mysql_mutex_unlock(&LOCK_global_system_variables);
+    /* Wakeup server monitor thread. */
+    os_event_set(srv_monitor_event);
+    mysql_mutex_lock(&LOCK_global_system_variables);
+  }
 }
 
 /** Update the system variable innodb_encryption_threads.
@@ -21071,7 +21065,7 @@ static MYSQL_SYSVAR_UINT(data_file_size_debug,
   srv_sys_space_size_debug,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "InnoDB system tablespace size to be set in recovery.",
-  NULL, NULL, 0, 0, UINT_MAX32, 0);
+  NULL, NULL, 0, 0, 256U << 20, 0);
 
 static MYSQL_SYSVAR_ULONG(fil_make_page_dirty_debug,
   srv_fil_make_page_dirty_debug, PLUGIN_VAR_OPCMDARG,
@@ -21198,7 +21192,7 @@ static MYSQL_SYSVAR_UINT(encryption_threads, srv_n_fil_crypt_threads,
 			 "scrubbing",
 			 NULL,
 			 innodb_encryption_threads_update,
-			 srv_n_fil_crypt_threads, 0, UINT_MAX32, 0);
+			 0, 0, 255, 0);
 
 static MYSQL_SYSVAR_UINT(encryption_rotate_key_age,
 			 srv_fil_crypt_rotate_key_age,

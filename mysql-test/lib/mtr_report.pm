@@ -466,17 +466,31 @@ sub mtr_report_stats ($$$$) {
       }
 
       $test_time = sprintf("%.3f", $test->{timer} / 1000);
-      $xml_report .= qq(\t\t<testcase assertions="" classname="$current_suite" name="$test->{'name'}" status="$test->{'result'}" time="$test_time");
+      $test->{'name'} =~ s/$current_suite\.//;
+
+      my $test_result;
+
+      # if a test case has to be retried it should have the result MTR_RES_FAILED in jUnit XML
+      if ($test->{'retries'} > 0) {
+        $test_result = "MTR_RES_FAILED";
+      } else {
+        $test_result = $test->{'result'};
+      }
+
+      $xml_report .= qq(\t\t<testcase assertions="" classname="$current_suite" name="$test->{'name'}" status="$test_result" time="$test_time");
 
       my $comment = $test->{'comment'};
       $comment =~ s/[\"]//g;
 
-      if ($test->{'result'} eq "MTR_RES_FAILED") {
-        $xml_report .= qq(>\n\t\t\t<failure message="" type="$test->{'result'}">\n<![CDATA[$test->{'logfile'}]]>\n\t\t\t</failure>\n\t\t</testcase>\n);
+      # if a test case has to be retried it should have the result MTR_RES_FAILED in jUnit XML
+      if ($test->{'result'} eq "MTR_RES_FAILED" || $test->{'retries'} > 0) {
+        my $logcontents = $test->{'logfile-failed'} || $test->{'logfile'};
+
+        $xml_report .= qq(>\n\t\t\t<failure message="" type="MTR_RES_FAILED">\n<![CDATA[$logcontents]]>\n\t\t\t</failure>\n\t\t</testcase>\n);
       } elsif ($test->{'result'} eq "MTR_RES_SKIPPED" && $test->{'disable'}) {
-        $xml_report .= qq(>\n\t\t\t<disabled message="$comment" type="$test->{'result'}"/>\n\t\t</testcase>\n);
+        $xml_report .= qq(>\n\t\t\t<disabled message="$comment" type="MTR_RES_SKIPPED"/>\n\t\t</testcase>\n);
       } elsif ($test->{'result'} eq "MTR_RES_SKIPPED") {
-        $xml_report .= qq(>\n\t\t\t<skipped message="$comment" type="$test->{'result'}"/>\n\t\t</testcase>\n);
+        $xml_report .= qq(>\n\t\t\t<skipped message="$comment" type="MTR_RES_SKIPPED"/>\n\t\t</testcase>\n);
       } else {
         $xml_report .= " />\n";
       }
@@ -635,6 +649,8 @@ sub mtr_error (@) {
   }
   else
   {
+    use Carp qw(cluck);
+    cluck "Error happened" if $verbose > 0;
     exit(1);
   }
 }
