@@ -157,6 +157,9 @@ dict_mem_table_create(
 	lock_table_lock_list_init(&table->locks);
 
 	UT_LIST_INIT(table->indexes, &dict_index_t::indexes);
+#ifdef BTR_CUR_HASH_ADAPT
+	UT_LIST_INIT(table->freed_indexes, &dict_index_t::indexes);
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	table->heap = heap;
 
@@ -210,6 +213,10 @@ dict_mem_table_free(
 {
 	ut_ad(table);
 	ut_ad(table->magic_n == DICT_TABLE_MAGIC_N);
+	ut_ad(UT_LIST_GET_LEN(table->indexes) == 0);
+#ifdef BTR_CUR_HASH_ADAPT
+	ut_ad(UT_LIST_GET_LEN(table->freed_indexes) == 0);
+#endif /* BTR_CUR_HASH_ADAPT */
 	ut_d(table->cached = FALSE);
 
 	if (dict_table_has_fts_index(table)
@@ -782,10 +789,9 @@ dict_mem_index_create(
 
 	dict_mem_fill_index_struct(index, heap, index_name, type, n_fields);
 
-	mutex_create(LATCH_ID_ZIP_PAD_MUTEX, &index->zip_pad.mutex);
+	new (&index->zip_pad.mutex) std::mutex();
 
 	if (type & DICT_SPATIAL) {
-		mutex_create(LATCH_ID_RTR_SSN_MUTEX, &index->rtr_ssn.mutex);
 		index->rtr_track = new
 			(mem_heap_alloc(heap, sizeof *index->rtr_track))
 			rtr_info_track_t();
@@ -1092,13 +1098,13 @@ dict_mem_index_free(
 	ut_ad(index);
 	ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
 
-	mutex_free(&index->zip_pad.mutex);
+	index->zip_pad.mutex.~mutex();
 
 	if (dict_index_is_spatial(index)) {
 		for (auto& rtr_info : index->rtr_track->rtr_active) {
 			rtr_info->index = NULL;
 		}
-		mutex_destroy(&index->rtr_ssn.mutex);
+
 		mutex_destroy(&index->rtr_track->rtr_active_mutex);
 		index->rtr_track->~rtr_info_track_t();
 	}

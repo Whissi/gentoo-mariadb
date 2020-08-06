@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 Copyright (c) 2013, 2014, Fusion-io
 
 This program is free software; you can redistribute it and/or modify it under
@@ -431,9 +431,9 @@ buf_flush_insert_into_flush_list(
 	ut_d(block->page.in_flush_list = TRUE);
 	ut_ad(!block->page.oldest_modification);
 	block->page.oldest_modification = lsn;
-	UNIV_MEM_ASSERT_RW(block->page.zip.data
-			   ? block->page.zip.data : block->frame,
-			   block->physical_size());
+	MEM_CHECK_DEFINED(block->page.zip.data
+			  ? block->page.zip.data : block->frame,
+			  block->physical_size());
 	incr_flush_list_size_in_bytes(block, buf_pool);
 
 	if (UNIV_LIKELY_NULL(buf_pool->flush_rbt)) {
@@ -486,18 +486,11 @@ buf_flush_ready_for_replace(
 #endif /* UNIV_DEBUG */
 	ut_ad(mutex_own(buf_page_get_mutex(bpage)));
 	ut_ad(bpage->in_LRU_list);
+	ut_a(buf_page_in_file(bpage));
 
-	if (buf_page_in_file(bpage)) {
-
-		return(bpage->oldest_modification == 0
-		       && bpage->buf_fix_count == 0
-		       && buf_page_get_io_fix(bpage) == BUF_IO_NONE);
-	}
-
-	ib::fatal() << "Buffer block " << bpage << " state " <<  bpage->state
-		<< " in the LRU list!";
-
-	return(FALSE);
+	return bpage->oldest_modification == 0
+		&& bpage->buf_fix_count == 0
+		&& buf_page_get_io_fix(bpage) == BUF_IO_NONE;
 }
 
 /********************************************************************//**
@@ -1007,11 +1000,8 @@ buf_flush_write_block_low(
 		break;
 	case BUF_BLOCK_ZIP_DIRTY:
 		frame = bpage->zip.data;
-
-		mach_write_to_8(frame + FIL_PAGE_LSN,
-				bpage->newest_modification);
-
-		ut_a(page_zip_verify_checksum(frame, bpage->zip_size()));
+		buf_flush_update_zip_checksum(frame, bpage->zip_size(),
+					      bpage->newest_modification);
 		break;
 	case BUF_BLOCK_FILE_PAGE:
 		frame = bpage->zip.data;
@@ -1369,9 +1359,7 @@ buf_flush_try_neighbors(
 		}
 	}
 
-	if (high > space->size) {
-		high = space->size;
-	}
+	high = space->max_page_number_for_io(high);
 
 	DBUG_PRINT("ib_buf", ("flush %u:%u..%u",
 			      page_id.space(),
@@ -3085,13 +3073,13 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(void*)
 	ulint	last_activity = srv_get_activity_count();
 	ulint	last_pages = 0;
 
-	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
+	while (srv_shutdown_state <= SRV_SHUTDOWN_INITIATED) {
 		ulint	curr_time = ut_time_ms();
 
 		/* The page_cleaner skips sleep if the server is
 		idle and there are no pending IOs in the buffer pool
 		and there is work to do. */
-		if (srv_check_activity(last_activity)
+		if (srv_check_activity(&last_activity)
 		    || buf_get_n_pending_read_ios()
 		    || n_flushed == 0) {
 
@@ -3103,7 +3091,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(void*)
 			ret_sleep = 0;
 		}
 
-		if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+		if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 			break;
 		}
 
@@ -3183,7 +3171,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(void*)
 
 			n_flushed = n_flushed_lru + n_flushed_list;
 
-		} else if (srv_check_activity(last_activity)) {
+		} else if (srv_check_activity(&last_activity)) {
 			ulint	n_to_flush;
 			lsn_t	lsn_limit = 0;
 
@@ -3270,7 +3258,7 @@ DECLARE_THREAD(buf_flush_page_cleaner_coordinator)(void*)
 		ut_d(buf_flush_page_cleaner_disabled_loop());
 	}
 
-	ut_ad(srv_shutdown_state > 0);
+	ut_ad(srv_shutdown_state > SRV_SHUTDOWN_INITIATED);
 	if (srv_fast_shutdown == 2
 	    || srv_shutdown_state == SRV_SHUTDOWN_EXIT_THREADS) {
 		/* In very fast shutdown or when innodb failed to start, we

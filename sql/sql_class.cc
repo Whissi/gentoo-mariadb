@@ -674,6 +674,7 @@ THD::THD(my_thread_id id, bool is_wsrep_applier)
    wsrep_has_ignored_error(false),
    wsrep_replicate_GTID(false),
    wsrep_ignore_table(false),
+   wsrep_aborter(0),
 
 /* wsrep-lib */
    m_wsrep_next_trx_id(WSREP_UNDEFINED_TRX_ID),
@@ -1204,10 +1205,8 @@ extern "C" my_thread_id next_thread_id_noinline()
 #endif
 
 
-const Type_handler *THD::type_handler_for_date() const
+const Type_handler *THD::type_handler_for_datetime() const
 {
-  if (!(variables.sql_mode & MODE_ORACLE))
-    return &type_handler_newdate;
   if (opt_mysql56_temporal_format)
     return &type_handler_datetime2;
   return &type_handler_datetime;
@@ -1288,6 +1287,7 @@ void THD::init()
   wsrep_affected_rows     = 0;
   m_wsrep_next_trx_id     = WSREP_UNDEFINED_TRX_ID;
   wsrep_replicate_GTID    = false;
+  wsrep_aborter           = 0;
 #endif /* WITH_WSREP */
 
   if (variables.sql_log_bin)
@@ -1381,7 +1381,11 @@ void THD::update_all_stats()
 void THD::init_for_queries()
 {
   set_time(); 
-  ha_enable_transaction(this,TRUE);
+  /*
+    We don't need to call ha_enable_transaction() as we can't have
+    any active transactions that has to be commited
+  */
+  transaction.on= TRUE;
 
   reset_root_defaults(mem_root, variables.query_alloc_block_size,
                       variables.query_prealloc_size);
@@ -2121,11 +2125,19 @@ void THD::reset_killed()
   DBUG_ENTER("reset_killed");
   if (killed != NOT_KILLED)
   {
+    mysql_mutex_assert_not_owner(&LOCK_thd_kill);
     mysql_mutex_lock(&LOCK_thd_kill);
     killed= NOT_KILLED;
     killed_err= 0;
     mysql_mutex_unlock(&LOCK_thd_kill);
   }
+#ifdef WITH_WSREP
+  mysql_mutex_assert_not_owner(&LOCK_thd_data);
+  mysql_mutex_lock(&LOCK_thd_data);
+  wsrep_aborter= 0;
+  mysql_mutex_unlock(&LOCK_thd_data);
+#endif /* WITH_WSREP */
+
   DBUG_VOID_RETURN;
 }
 
@@ -3761,7 +3773,6 @@ void select_dumpvar::cleanup()
 
 Query_arena::Type Query_arena::type() const
 {
-  DBUG_ASSERT(0); /* Should never be called */
   return STATEMENT;
 }
 
@@ -4854,6 +4865,7 @@ extern "C" LEX_STRING * thd_query_string (MYSQL_THD thd)
   @param buflen  Length of the buffer
 
   @return Length of the query
+  @retval 0 if LOCK_thd_data cannot be acquired without waiting
 
   @note This function is thread safe as the query string is
         accessed under mutex protection and the string is copied
@@ -4862,10 +4874,19 @@ extern "C" LEX_STRING * thd_query_string (MYSQL_THD thd)
 
 extern "C" size_t thd_query_safe(MYSQL_THD thd, char *buf, size_t buflen)
 {
-  mysql_mutex_lock(&thd->LOCK_thd_data);
-  size_t len= MY_MIN(buflen - 1, thd->query_length());
-  memcpy(buf, thd->query(), len);
-  mysql_mutex_unlock(&thd->LOCK_thd_data);
+  size_t len= 0;
+  /* InnoDB invokes this function while holding internal mutexes.
+  THD::awake() will hold LOCK_thd_data while invoking an InnoDB
+  function that would acquire the internal mutex. Because this
+  function is a non-essential part of information_schema view output,
+  we will break the deadlock by avoiding a mutex wait here
+  and returning the empty string if a wait would be needed. */
+  if (!mysql_mutex_trylock(&thd->LOCK_thd_data))
+  {
+    len= MY_MIN(buflen - 1, thd->query_length());
+    memcpy(buf, thd->query(), len);
+    mysql_mutex_unlock(&thd->LOCK_thd_data);
+  }
   buf[len]= '\0';
   return len;
 }
@@ -5748,7 +5769,9 @@ int THD::decide_logging_format(TABLE_LIST *tables)
     binlog by filtering rules.
   */
 #ifdef WITH_WSREP
-  if (WSREP_CLIENT_NNULL(this) && wsrep_thd_is_local(this) &&
+  if (WSREP_CLIENT_NNULL(this) &&
+      wsrep_thd_is_local(this) &&
+      wsrep_is_active(this) &&
       variables.wsrep_trx_fragment_size > 0)
   {
     if (!is_current_stmt_binlog_format_row())
@@ -7286,7 +7309,6 @@ wait_for_commit::~wait_for_commit()
   mysql_mutex_destroy(&LOCK_wait_commit);
   mysql_cond_destroy(&COND_wait_commit);
 }
-
 
 void
 wait_for_commit::wakeup(int wakeup_error)

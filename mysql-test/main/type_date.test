@@ -635,6 +635,24 @@ DROP TABLE t1;
 --echo #
 
 --echo #
+--echo # Start of 10.2 tests
+--echo #
+
+--echo #
+--echo # MDEV-21619 Server crash or assertion failures in my_datetime_to_str
+--echo #
+
+CREATE  TABLE t1 (f DATE, KEY(f));
+INSERT INTO t1 VALUES ('2020-01-01'),('2020-01-02');
+EXPLAIN EXTENDED SELECT * FROM t1 WHERE 1995.0000000 BETWEEN f AND '2012-12-12';
+DROP TABLE t1;
+
+
+--echo #
+--echo # End of 10.2 tests
+--echo #
+
+--echo #
 --echo # Start of 10.3 tests
 --echo #
 
@@ -722,6 +740,14 @@ SET sql_mode=DEFAULT;
 SELECT NULLIF(CAST(1012.5 AS DATE), 1);
 SELECT CAST(1012.5 AS DATE) * 1.0;
 
+--echo #
+--echo # MDEV-23351 Rounding functions return wrong data types for DATE input
+--echo #
+
+CREATE TABLE t1 (a date);
+CREATE TABLE t2 AS SELECT FLOOR(a), CEIL(a),ROUND(a),TRUNCATE(a,0) FROM t1;
+SHOW CREATE TABLE t2;
+DROP TABLE t2,t1;
 
 --echo #
 --echo # End of 10.4 tests

@@ -3,7 +3,7 @@
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -699,6 +699,7 @@ static bool srv_undo_tablespace_open(const char* name, ulint space_id,
 	if (create_new_db) {
 		space->size = file->size = ulint(size >> srv_page_size_shift);
 		space->size_in_header = SRV_UNDO_TABLESPACE_SIZE_IN_PAGES;
+		space->committed_size = SRV_UNDO_TABLESPACE_SIZE_IN_PAGES;
 	} else {
 		success = file->read_page0(true);
 		if (!success) {
@@ -1087,7 +1088,7 @@ srv_shutdown_all_bg_threads()
 			if (srv_start_state_is_set(SRV_START_STATE_MASTER)) {
 				/* c. We wake the master thread so that
 				it exits */
-				srv_wake_master_thread();
+				srv_inc_activity_count();
 			}
 
 			if (srv_start_state_is_set(SRV_START_STATE_PURGE)) {
@@ -1175,7 +1176,7 @@ srv_init_abort_low(
 #ifdef UNIV_DEBUG
 			" at " << innobase_basename(file) << "[" << line << "]"
 #endif /* UNIV_DEBUG */
-			" with error " << ut_strerr(err) << ". You may need"
+			" with error " << err << ". You may need"
 			" to delete the ibdata1 file before trying to start"
 			" up again.";
 	} else {
@@ -1183,7 +1184,7 @@ srv_init_abort_low(
 #ifdef UNIV_DEBUG
 			" at " << innobase_basename(file) << "[" << line << "]"
 #endif /* UNIV_DEBUG */
-			" with error " << ut_strerr(err);
+			" with error " << err;
 	}
 
 	srv_shutdown_bg_undo_sources();
@@ -1920,6 +1921,8 @@ files_checked:
 			if (sum_of_new_sizes > 0) {
 				/* New data file(s) were added */
 				mtr.start();
+				mtr.x_lock_space(fil_system.sys_space,
+						 __FILE__, __LINE__);
 				buf_block_t* block = buf_page_get(
 					page_id_t(0, 0), 0,
 					RW_SX_LATCH, &mtr);
@@ -2320,7 +2323,7 @@ skip_monitors:
 			thread_started[5 + i + SRV_MAX_N_IO_THREADS] = true;
 		}
 
-		while (srv_shutdown_state == SRV_SHUTDOWN_NONE
+		while (srv_shutdown_state <= SRV_SHUTDOWN_INITIATED
 		       && srv_force_recovery < SRV_FORCE_NO_BACKGROUND
 		       && !purge_sys.enabled()) {
 			ib::info() << "Waiting for purge to start";
@@ -2413,10 +2416,11 @@ void srv_shutdown_bg_undo_sources()
 {
 	if (srv_undo_sources) {
 		ut_ad(!srv_read_only_mode);
+		srv_shutdown_state = SRV_SHUTDOWN_INITIATED;
 		fts_optimize_shutdown();
 		dict_stats_shutdown();
 		while (row_get_background_drop_list_len_low()) {
-			srv_wake_master_thread();
+			srv_inc_activity_count();
 			os_thread_yield();
 		}
 		srv_undo_sources = false;
@@ -2430,11 +2434,15 @@ void innodb_shutdown()
 	ut_ad(!srv_undo_sources);
 
 	switch (srv_operation) {
+	case SRV_OPERATION_RESTORE_ROLLBACK_XA:
+		if (dberr_t err = fil_write_flushed_lsn(log_sys.lsn))
+			ib::error() << "Writing flushed lsn " << log_sys.lsn
+				    << " failed; error=" << err;
+		/* fall through */
 	case SRV_OPERATION_BACKUP:
 	case SRV_OPERATION_RESTORE:
 	case SRV_OPERATION_RESTORE_DELTA:
 	case SRV_OPERATION_RESTORE_EXPORT:
-	case SRV_OPERATION_RESTORE_ROLLBACK_XA:
 		fil_close_all_files();
 		break;
 	case SRV_OPERATION_NORMAL:
@@ -2496,7 +2504,7 @@ void innodb_shutdown()
 
 #ifdef BTR_CUR_HASH_ADAPT
 	if (dict_sys.is_initialised()) {
-		btr_search_disable(true);
+		btr_search_disable();
 	}
 #endif /* BTR_CUR_HASH_ADAPT */
 	if (ibuf) {

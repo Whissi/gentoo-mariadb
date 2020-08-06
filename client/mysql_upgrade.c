@@ -148,7 +148,7 @@ static struct my_option my_long_options[]=
    &opt_systables_only, &opt_systables_only, 0,
    GET_BOOL, NO_ARG, 0, 0, 0, 0, 0, 0},
 #define USER_OPT (array_elements(my_long_options) - 6)
-  {"user", 'u', "User for login if not current user.", &opt_user,
+  {"user", 'u', "User for login.", &opt_user,
    &opt_user, 0, GET_STR, REQUIRED_ARG, 0, 0, 0, 0, 0, 0},
   {"verbose", 'v', "Display more output about the process; Using it twice will print connection argument; Using it 3 times will print out all CHECK, RENAME and ALTER TABLE during the check phase.",
    &opt_not_used, &opt_not_used, 0, GET_BOOL, NO_ARG, 1, 0, 0, 0, 0, 0},
@@ -887,6 +887,7 @@ static const char *expected_errors[]=
   "ERROR 1290", /* RR_OPTION_PREVENTS_STATEMENT */
   "ERROR 1347", /* 'mysql.user' is not of type 'BASE TABLE' */
   "ERROR 1348", /* Column 'Show_db_priv' is not updatable */
+  "ERROR 1356", /* definer of view lack rights (UPDATE) */
   0
 };
 

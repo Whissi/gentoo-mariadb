@@ -1,5 +1,5 @@
 /*
-   Copyright (c) 2015,2019 MariaDB
+   Copyright (c) 2015, 2020, MariaDB
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -22,6 +22,12 @@
 #include "item.h"
 #include "log.h"
 #include "tztime.h"
+
+const DTCollation &DTCollation_numeric::singleton()
+{
+  static const DTCollation_numeric tmp;
+  return tmp;
+}
 
 Type_handler_row         type_handler_row;
 
@@ -73,6 +79,12 @@ Type_handler_interval_DDhhmmssff type_handler_interval_DDhhmmssff;
 #ifdef HAVE_SPATIAL
 Type_handler_geometry    type_handler_geometry;
 #endif
+
+
+Schema *Type_handler::schema() const
+{
+  return &mariadb_schema;
+}
 
 
 bool Type_handler_data::init()
@@ -395,17 +407,21 @@ bool Sec6::convert_to_mysql_time(THD *thd, int *warn, MYSQL_TIME *ltime,
 void Temporal::push_conversion_warnings(THD *thd, bool totally_useless_value,
                                         int warn,
                                         const char *typestr,
-                                        const TABLE_SHARE *s,
+                                        const char *db_name,
+                                        const char *table_name,
                                         const char *field_name,
                                         const char *value)
 {
   if (MYSQL_TIME_WARN_HAVE_WARNINGS(warn))
     thd->push_warning_wrong_or_truncated_value(Sql_condition::WARN_LEVEL_WARN,
                                                totally_useless_value,
-                                               typestr, value, s, field_name);
+                                               typestr, value,
+                                               db_name, table_name,
+                                               field_name);
   else if (MYSQL_TIME_WARN_HAVE_NOTES(warn))
     thd->push_warning_wrong_or_truncated_value(Sql_condition::WARN_LEVEL_NOTE,
-                                               false, typestr, value, s,
+                                               false, typestr, value,
+                                               db_name, table_name,
                                                field_name);
 }
 
@@ -980,7 +996,7 @@ bool Temporal::datetime_round_or_invalidate(THD *thd, uint dec, int *warn, ulong
   DBUG_ASSERT(dec <= TIME_SECOND_PART_DIGITS);
   if (datetime_add_nanoseconds_or_invalidate(thd, warn, nsec))
     return true;
-  my_time_trunc(this, dec);
+  my_datetime_trunc(this, dec);
   return false;
 
 }
@@ -3536,7 +3552,7 @@ uint32
 Type_handler_bit::Item_decimal_notation_int_digits(const Item *item)
                                                               const
 {
-  return Bit_decimal_notation_int_digits(item);
+  return Bit_decimal_notation_int_digits_by_nbits(item->max_length);
 }
 
 
@@ -3554,9 +3570,23 @@ Type_handler_general_purpose_int::Item_decimal_notation_int_digits(
     a divisor.
 */
 uint32
-Type_handler_bit::Bit_decimal_notation_int_digits(const Item *item)
+Type_handler_bit::Bit_decimal_notation_int_digits_by_nbits(uint nbits)
 {
-  return item->max_length/3+1;
+  DBUG_ASSERT(nbits > 0);
+  DBUG_ASSERT(nbits <= 64);
+  set_if_smaller(nbits, 64); // Safety
+  static uint ndigits[65]=
+  {0,
+   1,1,1,2,2,2,3,3,         // 1..8 bits
+   3,4,4,4,4,5,5,5,         // 9..16 bits
+   6,6,6,7,7,7,7,8,         // 17..24 bits
+   8,8,9,9,9,10,10,10,      // 25..32 bits
+   10,11,11,11,12,12,12,13, // 33..40 bits
+   13,13,13,14,14,14,15,15, // 41..48 bits
+   15,16,16,16,16,17,17,17, // 49..56 bits
+   18,18,18,19,19,19,19,20  // 57..64 bits
+  };
+  return ndigits[nbits];
 }
 
 /*************************************************************************/
@@ -4434,7 +4464,9 @@ bool Type_handler::Item_get_date_with_warn(THD *thd, Item *item,
                                            MYSQL_TIME *ltime,
                                            date_mode_t fuzzydate) const
 {
-  Temporal::Warn_push warn(thd, item->field_table_or_null(),
+  const TABLE_SHARE *s= item->field_table_or_null();
+  Temporal::Warn_push warn(thd, s ? s->db.str : nullptr,
+                           s ? s->table_name.str : nullptr,
                            item->field_name_or_null(), ltime, fuzzydate);
   Item_get_date(thd, item, &warn, ltime, fuzzydate);
   return ltime->time_type < 0;
@@ -4446,7 +4478,9 @@ bool Type_handler::Item_func_hybrid_field_type_get_date_with_warn(THD *thd,
                                               MYSQL_TIME *ltime,
                                               date_mode_t mode) const
 {
-  Temporal::Warn_push warn(thd, item->field_table_or_null(),
+  const TABLE_SHARE *s= item->field_table_or_null();
+  Temporal::Warn_push warn(thd, s ? s->db.str : nullptr,
+                           s ? s->table_name.str : nullptr,
                            item->field_name_or_null(), ltime, mode);
   Item_func_hybrid_field_type_get_date(thd, item, &warn, ltime, mode);
   return ltime->time_type < 0;
@@ -5645,7 +5679,41 @@ bool Type_handler_row::
 bool Type_handler_int_result::
        Item_func_round_fix_length_and_dec(Item_func_round *item) const
 {
-  item->fix_arg_int();
+  item->fix_arg_int(this, item->arguments()[0],
+                    field_type() == MYSQL_TYPE_LONGLONG);
+  return false;
+}
+
+
+bool Type_handler_year::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  item->fix_arg_int(&type_handler_long, item->arguments()[0], false); // 10.5 merge: fix to type_handler_ulong
+  return false;
+}
+
+
+bool Type_handler_hex_hybrid::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  item->fix_arg_hex_hybrid();
+  return false;
+}
+
+
+bool Type_handler_bit::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  uint nbits= item->arguments()[0]->max_length;
+  item->fix_length_and_dec_ulong_or_ulonglong_by_nbits(nbits);
+  return false;
+}
+
+
+bool Type_handler_typelib::
+       Item_func_round_fix_length_and_dec(Item_func_round *item) const
+{
+  item->fix_length_and_dec_long_or_longlong(5, true);
   return false;
 }
 
@@ -5666,10 +5734,12 @@ bool Type_handler_decimal_result::
 }
 
 
-bool Type_handler_temporal_result::
+bool Type_handler_date_common::
        Item_func_round_fix_length_and_dec(Item_func_round *item) const
 {
-  item->fix_arg_double();
+  static const Type_std_attributes attr(8, 0/*dec*/, true/*unsigned*/,
+                                        DTCollation_numeric::singleton());
+  item->fix_arg_int(&type_handler_long, &attr, false); // 10.5 merge: fix to *_ulong
   return false;
 }
 
@@ -5727,7 +5797,43 @@ bool Type_handler_row::
 bool Type_handler_int_result::
        Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
 {
-  item->fix_length_and_dec_int_or_decimal();
+  item->Type_std_attributes::set(item->arguments()[0]);
+  item->set_handler(this);
+  return false;
+}
+
+
+bool Type_handler_year::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  item->Type_std_attributes::set(item->arguments()[0]);
+  item->set_handler(&type_handler_long);
+  return false;
+}
+
+
+bool Type_handler_bit::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  uint nbits= item->arguments()[0]->max_length;
+  item->fix_length_and_dec_ulong_or_ulonglong_by_nbits(nbits);
+  return false;
+}
+
+
+bool Type_handler_typelib::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  item->fix_length_and_dec_long_or_longlong(5, true);
+  return false;
+}
+
+
+bool Type_handler_hex_hybrid::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  uint nchars= item->arguments()[0]->decimal_precision();
+  item->fix_length_and_dec_long_or_longlong(nchars, true);
   return false;
 }
 
@@ -5748,10 +5854,37 @@ bool Type_handler_decimal_result::
 }
 
 
-bool Type_handler_temporal_result::
+bool Type_handler_date_common::
        Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
 {
-  item->fix_length_and_dec_int_or_decimal();
+  static const Type_std_attributes attr(8, 0/*dec*/, true/*unsigned*/,
+                                        DTCollation_numeric::singleton());
+  item->Type_std_attributes::set(attr);
+  item->set_handler(&type_handler_long); // 10.5 merge: fix to *_ulong
+  return false;
+}
+
+
+bool Type_handler_time_common::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  item->fix_length_and_dec_time();
+  return false;
+}
+
+
+bool Type_handler_datetime_common::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  item->fix_length_and_dec_datetime();
+  return false;
+}
+
+
+bool Type_handler_timestamp_common::
+       Item_func_int_val_fix_length_and_dec(Item_func_int_val *item) const
+{
+  item->fix_length_and_dec_datetime();
   return false;
 }
 
@@ -6147,7 +6280,7 @@ bool Type_handler_decimal_result::
 bool Type_handler_temporal_result::
        Item_func_plus_fix_length_and_dec(Item_func_plus *item) const
 {
-  item->fix_length_and_dec_temporal();
+  item->fix_length_and_dec_temporal(true);
   return false;
 }
 
@@ -6196,7 +6329,7 @@ bool Type_handler_decimal_result::
 bool Type_handler_temporal_result::
        Item_func_minus_fix_length_and_dec(Item_func_minus *item) const
 {
-  item->fix_length_and_dec_temporal();
+  item->fix_length_and_dec_temporal(true);
   return false;
 }
 
@@ -6245,7 +6378,7 @@ bool Type_handler_decimal_result::
 bool Type_handler_temporal_result::
        Item_func_mul_fix_length_and_dec(Item_func_mul *item) const
 {
-  item->fix_length_and_dec_temporal();
+  item->fix_length_and_dec_temporal(true);
   return false;
 }
 
@@ -6294,7 +6427,7 @@ bool Type_handler_decimal_result::
 bool Type_handler_temporal_result::
        Item_func_div_fix_length_and_dec(Item_func_div *item) const
 {
-  item->fix_length_and_dec_temporal();
+  item->fix_length_and_dec_temporal(false);
   return false;
 }
 
@@ -6343,7 +6476,7 @@ bool Type_handler_decimal_result::
 bool Type_handler_temporal_result::
        Item_func_mod_fix_length_and_dec(Item_func_mod *item) const
 {
-  item->fix_length_and_dec_temporal();
+  item->fix_length_and_dec_temporal(true);
   return false;
 }
 
@@ -8166,7 +8299,8 @@ static void literal_warn(THD *thd, const Item *item,
       ErrConvString err(str, length, cs);
       thd->push_warning_wrong_or_truncated_value(
                                    Sql_condition::time_warn_level(st->warnings),
-                                   false, typestr, err.ptr(), NULL, NullS);
+                                   false, typestr, err.ptr(),
+                                   nullptr, nullptr, nullptr);
     }
   }
   else if (send_error)

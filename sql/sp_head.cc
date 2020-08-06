@@ -1152,6 +1152,7 @@ sp_head::execute(THD *thd, bool merge_da_on_success)
               backup_arena;
   query_id_t old_query_id;
   TABLE *old_derived_tables;
+  TABLE *old_rec_tables;
   LEX *old_lex;
   Item_change_list old_change_list;
   String old_packet;
@@ -1232,6 +1233,8 @@ sp_head::execute(THD *thd, bool merge_da_on_success)
   old_query_id= thd->query_id;
   old_derived_tables= thd->derived_tables;
   thd->derived_tables= 0;
+  old_rec_tables= thd->rec_tables;
+  thd->rec_tables= 0;
   save_sql_mode= thd->variables.sql_mode;
   thd->variables.sql_mode= m_sql_mode;
   save_abort_on_warning= thd->abort_on_warning;
@@ -1490,6 +1493,7 @@ sp_head::execute(THD *thd, bool merge_da_on_success)
   thd->set_query_id(old_query_id);
   DBUG_ASSERT(!thd->derived_tables);
   thd->derived_tables= old_derived_tables;
+  thd->rec_tables= old_rec_tables;
   thd->variables.sql_mode= save_sql_mode;
   thd->abort_on_warning= save_abort_on_warning;
   thd->m_reprepare_observer= save_reprepare_observer;
@@ -4505,7 +4509,7 @@ sp_instr_agg_cfetch::execute(THD *thd, uint *nextp)
   else
   {
     thd->spcont->pause_state= FALSE;
-    if (thd->server_status == SERVER_STATUS_LAST_ROW_SENT)
+    if (thd->server_status & SERVER_STATUS_LAST_ROW_SENT)
     {
       my_message(ER_SP_FETCH_NO_DATA,
                  ER_THD(thd, ER_SP_FETCH_NO_DATA), MYF(0));

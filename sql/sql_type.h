@@ -1,7 +1,7 @@
 #ifndef SQL_TYPE_H_INCLUDED
 #define SQL_TYPE_H_INCLUDED
 /*
-   Copyright (c) 2015  MariaDB Foundation.
+   Copyright (c) 2015, 2020, MariaDB
 
  This program is free software; you can redistribute it and/or modify
  it under the terms of the GNU General Public License as published by
@@ -663,34 +663,39 @@ public:
   public:
     void push_conversion_warnings(THD *thd, bool totally_useless_value,
                                   date_mode_t mode, timestamp_type tstype,
-                                  const TABLE_SHARE* s, const char *name)
+                                  const char *db_name, const char *table_name,
+                                  const char *name)
     {
       const char *typestr= tstype >= 0 ? type_name_by_timestamp_type(tstype) :
                            mode & (TIME_INTERVAL_hhmmssff | TIME_INTERVAL_DAY) ?
                            "interval" :
                            mode & TIME_TIME_ONLY ? "time" : "datetime";
       Temporal::push_conversion_warnings(thd, totally_useless_value, warnings,
-                                         typestr, s, name, ptr());
+                                         typestr, db_name, table_name, name,
+                                         ptr());
     }
   };
 
   class Warn_push: public Warn
   {
-    THD *m_thd;
-    const TABLE_SHARE *m_s;
-    const char *m_name;
-    const MYSQL_TIME *m_ltime;
-    date_mode_t m_mode;
+    THD * const m_thd;
+    const char * const m_db_name;
+    const char * const m_table_name;
+    const char * const m_name;
+    const MYSQL_TIME * const m_ltime;
+    const date_mode_t m_mode;
   public:
-    Warn_push(THD *thd, const TABLE_SHARE *s, const char *name,
-              const MYSQL_TIME *ltime, date_mode_t mode)
-    :m_thd(thd), m_s(s), m_name(name), m_ltime(ltime), m_mode(mode)
+    Warn_push(THD *thd, const char *db_name, const char *table_name,
+              const char *name, const MYSQL_TIME *ltime, date_mode_t mode)
+      : m_thd(thd), m_db_name(db_name), m_table_name(table_name), m_name(name),
+        m_ltime(ltime), m_mode(mode)
     { }
     ~Warn_push()
     {
       if (warnings)
         push_conversion_warnings(m_thd, m_ltime->time_type < 0,
-                                 m_mode, m_ltime->time_type, m_s, m_name);
+                                 m_mode, m_ltime->time_type,
+                                 m_db_name, m_table_name, m_name);
     }
   };
 
@@ -731,7 +736,8 @@ public:
   }
   static void push_conversion_warnings(THD *thd, bool totally_useless_value, int warn,
                                        const char *type_name,
-                                       const TABLE_SHARE *s,
+                                       const char *db_name,
+                                       const char *table_name,
                                        const char *field_name,
                                        const char *value);
   /*
@@ -1279,6 +1285,8 @@ public:
   }
 };
 
+class Schema;
+
 
 /**
   Class Time is designed to store valid TIME values.
@@ -1358,6 +1366,14 @@ public:
     { }
   };
 
+  class Options_for_round: public Options
+  {
+  public:
+    Options_for_round(time_round_mode_t round_mode= TIME_FRAC_TRUNCATE)
+     :Options(Time::default_flags_for_get_date(), round_mode,
+              Time::DATETIME_TO_TIME_DISALLOW)
+    { }
+  };
   class Options_cmp: public Options
   {
   public:
@@ -1708,6 +1724,40 @@ public:
       my_time_trunc(this, dec);
     DBUG_ASSERT(is_valid_value_slow());
     return *this;
+  }
+  Time &ceiling(int *warn)
+  {
+    if (is_valid_time())
+    {
+      if (neg)
+        my_time_trunc(this, 0);
+      else if (second_part)
+        round_or_set_max(0, warn, 999999999);
+    }
+    DBUG_ASSERT(is_valid_value_slow());
+    return *this;
+  }
+  Time &ceiling()
+  {
+    int warn= 0;
+    return ceiling(&warn);
+  }
+  Time &floor(int *warn)
+  {
+    if (is_valid_time())
+    {
+      if (!neg)
+        my_time_trunc(this, 0);
+      else if (second_part)
+        round_or_set_max(0, warn, 999999999);
+    }
+    DBUG_ASSERT(is_valid_value_slow());
+    return *this;
+  }
+  Time &floor()
+  {
+    int warn= 0;
+    return floor(&warn);
   }
   Time &round(uint dec, int *warn)
   {
@@ -2276,9 +2326,21 @@ public:
   Datetime &trunc(uint dec)
   {
     if (is_valid_datetime())
-      my_time_trunc(this, dec);
+      my_datetime_trunc(this, dec);
     DBUG_ASSERT(is_valid_value_slow());
     return *this;
+  }
+  Datetime &ceiling(THD *thd, int *warn)
+  {
+    if (is_valid_datetime() && second_part)
+      round_or_invalidate(thd, 0, warn, 999999999);
+    DBUG_ASSERT(is_valid_value_slow());
+    return *this;
+  }
+  Datetime &ceiling(THD *thd)
+  {
+    int warn= 0;
+    return ceiling(thd, &warn);
   }
   Datetime &round(THD *thd, uint dec, int *warn)
   {
@@ -2685,6 +2747,17 @@ public:
                                         (uchar *) s->ptr(), s->length(),
                                         (uchar *) t->ptr(), t->length());
   }
+};
+
+
+class DTCollation_numeric: public DTCollation
+{
+public:
+  DTCollation_numeric()
+   :DTCollation(charset_info(), DERIVATION_NUMERIC, MY_REPERTOIRE_NUMERIC)
+  { }
+  static const CHARSET_INFO *charset_info() { return &my_charset_numeric; }
+  static const DTCollation & singleton();
 };
 
 
@@ -3216,6 +3289,7 @@ public:
   Type_handler *aggregate_for_num_op_traditional(const Type_handler *h1,
                                                  const Type_handler *h2);
 
+  virtual Schema *schema() const;
   virtual const Name name() const= 0;
   virtual const Name version() const { return m_version_default; }
   virtual enum_field_types field_type() const= 0;
@@ -4604,8 +4678,6 @@ public:
   bool Item_func_between_fix_length_and_dec(Item_func_between *func) const;
   bool Item_func_in_fix_comparator_compatible_types(THD *thd,
                                                     Item_func_in *) const;
-  bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
-  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   bool Item_func_abs_fix_length_and_dec(Item_func_abs *) const;
   bool Item_func_neg_fix_length_and_dec(Item_func_neg *) const;
   bool Item_func_plus_fix_length_and_dec(Item_func_plus *) const;
@@ -5070,6 +5142,8 @@ public:
                                    const Column_definition_attributes *attr,
                                    uint32 flags) const;
   Item_cache *Item_get_cache(THD *thd, const Item *item) const;
+  bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   void Item_get_date(THD *thd, Item *item, Temporal::Warn *warn,
                      MYSQL_TIME *ltime,  date_mode_t fuzzydate) const;
   void Item_func_hybrid_field_type_get_date(THD *,
@@ -5093,7 +5167,7 @@ public:
   }
   uint32 max_display_length(const Item *item) const;
   uint32 Item_decimal_notation_int_digits(const Item *item) const;
-  static uint32 Bit_decimal_notation_int_digits(const Item *item); 
+  static uint32 Bit_decimal_notation_int_digits_by_nbits(uint nbits);
   uint32 calc_pack_length(uint32 length) const { return length / 8; }
   bool Item_send(Item *item, Protocol *protocol, st_value *buf) const
   {
@@ -5103,6 +5177,8 @@ public:
   {
     return print_item_value_csstr(thd, item, str);
   }
+  bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   Field *make_conversion_table_field(TABLE *, uint metadata,
                                      const Field *target) const;
   bool Column_definition_fix_attributes(Column_definition *c) const;
@@ -5305,6 +5381,7 @@ public:
                                   MYSQL_TIME *, date_mode_t fuzzydate) const;
   longlong Item_func_between_val_int(Item_func_between *func) const;
   bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   Item *make_const_item_for_comparison(THD *, Item *src, const Item *cmp) const;
   bool set_comparator_func(Arg_comparator *cmp) const;
   cmp_item *make_cmp_item(THD *thd, CHARSET_INFO *cs) const;
@@ -5427,6 +5504,8 @@ public:
   longlong Item_func_min_max_val_int(Item_func_min_max *) const;
   my_decimal *Item_func_min_max_val_decimal(Item_func_min_max *,
                                             my_decimal *) const;
+  bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   bool Item_hybrid_func_fix_attributes(THD *thd,
                                        const char *name,
                                        Type_handler_hybrid_field_type *,
@@ -5532,6 +5611,7 @@ public:
   my_decimal *Item_func_min_max_val_decimal(Item_func_min_max *,
                                             my_decimal *) const;
   bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   bool Item_hybrid_func_fix_attributes(THD *thd,
                                        const char *name,
                                        Type_handler_hybrid_field_type *,
@@ -5634,6 +5714,7 @@ public:
   int cmp_native(const Native &a, const Native &b) const;
   longlong Item_func_between_val_int(Item_func_between *func) const;
   bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   cmp_item *make_cmp_item(THD *thd, CHARSET_INFO *cs) const;
   in_vector *make_in_vector(THD *thd, const Item_func_in *f, uint nargs) const;
   void make_sort_key(uchar *to, Item *item, const SORT_FIELD_ATTR *sort_field,
@@ -5977,6 +6058,8 @@ public:
   const Name name() const { return m_name_hex_hybrid; }
   const Type_handler *cast_to_int_type_handler() const;
   const Type_handler *type_handler_for_system_time() const;
+  bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
 };
 
 
@@ -6212,6 +6295,8 @@ public:
   enum_field_types field_type() const { return MYSQL_TYPE_STRING; }
   const Type_handler *type_handler_for_item_field() const;
   const Type_handler *cast_to_int_type_handler() const;
+  bool Item_func_round_fix_length_and_dec(Item_func_round *) const;
+  bool Item_func_int_val_fix_length_and_dec(Item_func_int_val *) const;
   bool Item_hybrid_func_fix_attributes(THD *thd,
                                        const char *name,
                                        Type_handler_hybrid_field_type *,

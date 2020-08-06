@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, Google Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -593,8 +593,8 @@ sync_array_cell_print(
 #endif
 				"\n",
 				rw_lock_get_reader_count(rwlock),
-				rwlock->waiters.load(std::memory_order_relaxed),
-				rwlock->lock_word.load(std::memory_order_relaxed),
+				uint32_t{rwlock->waiters},
+				int32_t{rwlock->lock_word},
 				innobase_basename(rwlock->last_x_file_name),
 				rwlock->last_x_line
 #if 0 /* JAN: TODO: FIX LATER */
@@ -976,9 +976,9 @@ sync_array_print_long_waits_low(
 		return(false);
 	}
 
-#ifdef UNIV_DEBUG_VALGRIND
+#if defined HAVE_valgrind && !__has_feature(memory_sanitizer)
 	/* Increase the timeouts if running under valgrind because it executes
-	extremely slowly. UNIV_DEBUG_VALGRIND does not necessary mean that
+	extremely slowly. HAVE_valgrind does not necessary mean that
 	we are running under valgrind but we have no better way to tell.
 	See Bug#58432 innodb.innodb_bug56143 fails under valgrind
 	for an example */
@@ -1075,7 +1075,8 @@ sync_array_print_long_waits(
 		sync_array_exit(arr);
 	}
 
-	if (noticed) {
+	if (noticed && srv_monitor_event) {
+
 		fprintf(stderr,
 			"InnoDB: ###### Starts InnoDB Monitor"
 			" for 30 secs to print diagnostic info:\n");
@@ -1381,9 +1382,9 @@ sync_arr_fill_sys_semphore_waits_table(
 						//fields[SYS_SEMAPHORE_WAITS_HOLDER_LINE]->set_notnull();
 						OK(field_store_ulint(fields[SYS_SEMAPHORE_WAITS_READERS], rw_lock_get_reader_count(rwlock)));
 						OK(field_store_ulint(fields[SYS_SEMAPHORE_WAITS_WAITERS_FLAG],
-						   rwlock->waiters.load(std::memory_order_relaxed)));
+						   rwlock->waiters));
 						OK(field_store_ulint(fields[SYS_SEMAPHORE_WAITS_LOCK_WORD],
-						   rwlock->lock_word.load(std::memory_order_relaxed)));
+						   rwlock->lock_word));
 						OK(field_store_string(fields[SYS_SEMAPHORE_WAITS_LAST_WRITER_FILE], innobase_basename(rwlock->last_x_file_name)));
 						OK(fields[SYS_SEMAPHORE_WAITS_LAST_WRITER_LINE]->store(rwlock->last_x_line, true));
 						fields[SYS_SEMAPHORE_WAITS_LAST_WRITER_LINE]->set_notnull();

@@ -18,6 +18,7 @@
 #include "log.h"
 #include "sql_plugin.h"
 #include <my_crypt.h>
+#include <violite.h>
 
 /* there can be only one encryption plugin enabled */
 static plugin_ref encryption_manager= 0;
@@ -63,6 +64,8 @@ int initialize_encryption_plugin(st_plugin_int *plugin)
   if (encryption_manager)
     return 1;
 
+  vio_check_ssl_init();
+
   if (plugin->plugin->init && plugin->plugin->init(plugin))
   {
     sql_print_error("Plugin '%s' init function returned error.",
@@ -75,8 +78,8 @@ int initialize_encryption_plugin(st_plugin_int *plugin)
     (struct st_mariadb_encryption*) plugin->plugin->info;
 
   /*
-    Copmiler on Spark doesn't like the '?' operator here as it
-    belives the (uint (*)...) implies the C++ call model.
+    Compiler on Spark doesn't like the '?' operator here as it
+    believes the (uint (*)...) implies the C++ call model.
   */
   if (handle->crypt_ctx_size)
     encryption_handler.encryption_ctx_size_func= handle->crypt_ctx_size;

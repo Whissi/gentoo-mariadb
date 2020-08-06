@@ -69,6 +69,11 @@ IF(CMAKE_SYSTEM_PROCESSOR STREQUAL "i686" AND CMAKE_COMPILER_IS_GNUCC AND
   SET(PLUGIN_QUERY_RESPONSE_TIME NO CACHE BOOL "Disabled, gcc is too old")
 ENDIF()
 
+# use runtime atomic-support detection in aarch64
+IF(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+  MY_CHECK_AND_SET_COMPILER_FLAG("-moutline-atomics")
+ENDIF()
+
 IF(WITHOUT_DYNAMIC_PLUGINS)
   MESSAGE("Dynamic plugins are disabled.")
 ENDIF(WITHOUT_DYNAMIC_PLUGINS)
@@ -791,14 +796,6 @@ CHECK_CXX_SOURCE_COMPILES("
   }"
   HAVE_ABI_CXA_DEMANGLE)
 ENDIF()
-
-CHECK_C_SOURCE_COMPILES("
-  int main(int argc, char **argv) 
-  {
-    extern char *__bss_start;
-    return __bss_start ? 1 : 0;
-  }"
-HAVE_BSS_START)
 
 CHECK_C_SOURCE_COMPILES("
     int main()

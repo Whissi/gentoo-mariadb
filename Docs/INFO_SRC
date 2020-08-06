@@ -1,8 +1,8 @@
-commit: 1b18cddaa23711776537ee98f16529a74ff861c2
-date: 2020-05-09 22:20:04 +0300
-build-date: 2020-05-09 19:28:06 +0000 
-short: 1b18cdd
+commit: ddffcad64c9ff3299037eed9df1bc92d51f8d07e
+date: 2020-08-06 17:13:02 +0200
+build-date: 2020-08-06 15:28:28 +0000 
+short: ddffcad
 branch: HEAD
 
 
-MariaDB source 10.4.13
+MariaDB source 10.4.14

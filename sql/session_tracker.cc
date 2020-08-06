@@ -189,7 +189,13 @@ bool sysvartrack_validate_value(THD *thd, const char *str, size_t len)
   char *token, *lasts= NULL;
   size_t rest= var_list.length;
 
-  if (!var_list.str || var_list.length == 0 ||
+  if (!var_list.str)
+  {
+    my_error(ER_WRONG_VALUE_FOR_VAR, MYF(0),
+             "session_track_system_variables", "NULL");
+    return false;
+  }
+  if (var_list.length == 0 ||
       !strcmp(var_list.str, "*"))
   {
     return false;
@@ -380,16 +386,12 @@ bool Session_sysvars_tracker::enable(THD *thd)
 bool Session_sysvars_tracker::update(THD *thd, set_var *var)
 {
   vars_list tool_list;
-  void *copy;
   size_t length= 1;
-
-  if (var->save_result.string_value.str)
-    copy= my_memdup(var->save_result.string_value.str,
-                    (length= var->save_result.string_value.length + 1),
-                    MYF(MY_WME | MY_THREAD_SPECIFIC));
-    else
-      copy= my_strdup("", MYF(MY_WME | MY_THREAD_SPECIFIC));
-
+  void *copy= var->save_result.string_value.str ?
+              my_memdup(var->save_result.string_value.str,
+                        (length= var->save_result.string_value.length + 1),
+                        MYF(MY_WME | MY_THREAD_SPECIFIC)) :
+              my_strdup("", MYF(MY_WME | MY_THREAD_SPECIFIC));
   if (!copy)
     return true;
 

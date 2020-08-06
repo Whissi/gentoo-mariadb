@@ -26,6 +26,7 @@ else()
 endif()
 
 include(CheckIncludeFile)
+include(CheckLibraryExists)
 
 # Options
 
@@ -83,11 +84,23 @@ endif()
 # Enable extra libstdc++ assertions with debug build.
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_definitions("-D_GLIBCXX_ASSERTIONS")
+else()
+  # Make sure that NDEBUG is enabled in release builds even
+  # if the parent project does not define it.
+  add_definitions("-DNDEBUG")
 endif()
 
 # Set up include directories
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/include")
 include_directories("${CMAKE_CURRENT_SOURCE_DIR}/wsrep-API")
+
+# Find libraries.
+CHECK_LIBRARY_EXISTS(dl dlopen "" WSREP_LIB_HAVE_LIBDL)
+if (WSREP_LIB_HAVE_LIBDL)
+  set(WSREP_LIB_LIBDL "dl")
+else()
+  set(WSREP_LIB_LIBDL "")
+endif()
 
 if (WSREP_LIB_WITH_UNIT_TESTS)
   find_package(Boost 1.54.0 REQUIRED

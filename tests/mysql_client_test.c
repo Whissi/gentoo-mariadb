@@ -1,5 +1,5 @@
 /* Copyright (c) 2002, 2014, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2019, MariaDB
+   Copyright (c) 2008, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20548,6 +20548,59 @@ static void test_bulk_replace()
 }
 #endif
 
+
+static void test_ps_params_in_ctes()
+{
+  int rc;
+  const char *query;
+  MYSQL_BIND ps_params[1];
+  int int_data[1];
+  MYSQL_STMT *stmt;
+
+  rc= mysql_query(mysql, "create table t1(a int, b int, key(a))");
+  myquery(rc);
+
+  rc= mysql_query(mysql, "insert into t1 (a) values "
+                         "(0),(1),(2),(3),(4),(5),(6),(7),(8),(9)");
+  myquery(rc);
+
+  query=
+    "explain "
+    "with T as "
+    "( "
+    "  select * from t1 where t1.a=? limit 2 "
+    ") "
+    "select * from T as TA, T as TB;";
+
+  stmt= mysql_stmt_init(mysql);
+  check_stmt(stmt);
+
+  rc= mysql_stmt_prepare(stmt, query, (uint) strlen(query));
+  check_execute(stmt, rc);
+
+  int_data[0]=2;
+
+  ps_params[0].buffer_type= MYSQL_TYPE_LONG;
+  ps_params[0].buffer= (char *) &int_data[0];
+  ps_params[0].length= 0;
+  ps_params[0].is_null= 0;
+
+  rc= mysql_stmt_bind_param(stmt, ps_params);
+  check_execute(stmt, rc);
+
+  rc= mysql_stmt_execute(stmt);
+  check_execute(stmt, rc);
+
+  rc= mysql_stmt_store_result(stmt);
+  check_execute(stmt, rc);
+
+  mysql_stmt_close(stmt);
+
+  rc= mysql_query(mysql, "drop table t1");
+  myquery(rc);
+}
+
+
 static void print_metadata(MYSQL_RES *rs_metadata, int num_fields)
 {
   int i;
@@ -20886,6 +20939,53 @@ static void test_explain_meta()
   mct_close_log();
 }
 
+
+/*
+  MDEV-20261 NULL passed to String::eq, SEGV, server crash, regression in 10.4
+*/
+static void test_mdev20261()
+{
+  int rc;
+  MYSQL_STMT *stmt;
+  MYSQL_BIND param[1];
+  const char *query= "SELECT * FROM t1 WHERE f = ? OR f = 'foo'";
+  char val[]= "";
+  my_bool is_null= TRUE;
+
+  myheader("test_mdev20261");
+
+  rc= mysql_query(mysql, "CREATE OR REPLACE TABLE t1 (f varchar(64)) ENGINE=MyISAM");
+  myquery(rc);
+
+  stmt= mysql_stmt_init(mysql);
+  check_stmt(stmt);
+  rc= mysql_stmt_prepare(stmt, query, strlen(query));
+  check_execute(stmt, rc);
+
+  verify_param_count(stmt, 1);
+
+  bzero((char*) param, sizeof(param));
+
+  param[0].buffer= &val;
+  param[0].buffer_type= MYSQL_TYPE_STRING;
+  param[0].is_null= &is_null;
+
+  rc= mysql_stmt_bind_param(stmt, param);
+  check_execute(stmt, rc);
+
+  rc= mysql_stmt_execute(stmt);
+  check_execute(stmt, rc);
+
+  rc= mysql_stmt_store_result(stmt);
+  check_execute(stmt, rc);
+
+  mysql_stmt_close(stmt);
+
+  rc= mysql_query(mysql, "DROP TABLE t1");
+  myquery(rc);
+}
+
+
 static struct my_tests_st my_tests[]= {
   { "disable_query_logs", disable_query_logs },
   { "test_view_sp_list_fields", test_view_sp_list_fields },
@@ -21177,8 +21277,10 @@ static struct my_tests_st my_tests[]= {
   { "test_bulk_delete", test_bulk_delete },
   { "test_bulk_replace", test_bulk_replace },
 #endif
+  { "test_ps_params_in_ctes", test_ps_params_in_ctes },
   { "test_explain_meta", test_explain_meta },
   { "test_mdev18408", test_mdev18408 },
+  { "test_mdev20261", test_mdev20261 },
   { 0, 0 }
 };
 

@@ -42,7 +42,7 @@
 #define MAX_EXPONENT 1024
 
 /*****************************************************************************
-  Instansiate templates and static variables
+  Instantiate templates and static variables
 *****************************************************************************/
 
 static const char *zero_timestamp="0000-00-00 00:00:00.000000";
@@ -57,7 +57,7 @@ const char field_separator=',';
 #define BLOB_PACK_LENGTH_TO_MAX_LENGH(arg) \
                         ((ulong) ((1LL << MY_MIN(arg, 4) * 8) - 1))
 
-// Column marked for read or the field set to read out or record[0] or [1]
+// Column marked for read or the field set to read out of record[0]
 inline bool Field::marked_for_read() const
 {
   return !table ||
@@ -68,7 +68,7 @@ inline bool Field::marked_for_read() const
 }
 
 /*
-  The name of this function is a bit missleading as in 10.4 we don't
+  The name of this function is a bit misleading as in 10.4 we don't
   have to test anymore if the field is computed. Instead we mark
   changed fields with DBUG_FIX_WRITE_SET() in table.cc
 */
@@ -88,7 +88,7 @@ inline bool Field::marked_for_write_or_computed() const
 /*
   Rules for merging different types of fields in UNION
 
-  NOTE: to avoid 256*256 table, gap in table types numeration is skiped
+  NOTE: to avoid 256*256 table, gap in table types numeration is skipped
   following #defines describe that gap and how to canculate number of fields
   and index of field in this array.
 */
@@ -1392,7 +1392,7 @@ void Field::error_generated_column_function_is_not_allowed(THD *thd,
                                 QT_ITEM_IDENT_SKIP_TABLE_NAMES));
   my_error(ER_GENERATED_COLUMN_FUNCTION_IS_NOT_ALLOWED,
            MYF(error ? 0 : ME_WARNING),
-           tmp.c_ptr(), vcol_info->get_vcol_type_name(),
+           tmp.c_ptr_safe(), vcol_info->get_vcol_type_name(),
            const_cast<const char*>(field_name.str));
 }
 
@@ -1490,7 +1490,7 @@ Item *Field_num::get_equal_zerofill_const_item(THD *thd, const Context &ctx,
 
 
 /**
-  Contruct warning parameters using thd->no_errors
+Construct warning parameters using thd->no_errors
   to determine whether to generate or suppress warnings.
   We can get here in a query like this:
     SELECT COUNT(@@basedir);
@@ -1538,7 +1538,7 @@ Value_source::Converter_string_to_number::check_edom_and_truncation(THD *thd,
     if (filter.want_warning_edom())
     {
       /*
-        We can use err.ptr() here as ErrConvString is guranteed to put an
+        We can use err.ptr() here as ErrConvString is guaranteed to put an
         end \0 here.
       */
       THD *wthd= thd ? thd : current_thd;
@@ -1570,7 +1570,7 @@ Value_source::Converter_string_to_number::check_edom_and_truncation(THD *thd,
   - found garbage at the end of the string.
 
   @param type          Data type name (e.g. "decimal", "integer", "double")
-  @param edom          Indicates that the string-to-number routine retuned
+  @param edom          Indicates that the string-to-number routine returned
                        an error code equivalent to EDOM (value out of domain),
                        i.e. the string fully consisted of garbage and the
                        conversion routine could not get any digits from it.
@@ -1633,7 +1633,7 @@ int Field_num::check_edom_and_truncation(const char *type, bool edom,
 
 
 /*
-  Conver a string to an integer then check bounds.
+  Convert a string to an integer then check bounds.
   
   SYNOPSIS
     Field_num::get_int
@@ -2322,7 +2322,7 @@ uint Field::fill_cache_field(CACHE_FIELD *copy)
 bool Field::get_date(MYSQL_TIME *to, date_mode_t mode)
 {
   StringBuffer<40> tmp;
-  Temporal::Warn_push warn(get_thd(), NULL, NullS, to, mode);
+  Temporal::Warn_push warn(get_thd(), nullptr, nullptr, nullptr, to, mode);
   Temporal_hybrid *t= new(to) Temporal_hybrid(get_thd(), &warn,
                                               val_str(&tmp), mode);
   return !t->is_valid_temporal();
@@ -2730,7 +2730,7 @@ int Field_decimal::store(const char *from_arg, size_t len, CHARSET_INFO *cs)
     We only have to generate warnings if count_cuted_fields is set.
     This is to avoid extra checks of the number when they are not needed.
     Even if this flag is not set, it's OK to increment warnings, if
-    it makes the code easer to read.
+    it makes the code easier to read.
   */
 
   if (get_thd()->count_cuted_fields > CHECK_FIELD_EXPRESSION)
@@ -2813,7 +2813,7 @@ int Field_decimal::store(const char *from_arg, size_t len, CHARSET_INFO *cs)
   }
   
   /*
-    Now write the formated number
+    Now write the formatted number
     
     First the digits of the int_% parts.
     Do we have enough room to write these digits ?
@@ -3333,7 +3333,7 @@ int Field_new_decimal::store(const char *from, size_t length,
             If check_decimal() failed because of EDOM-alike error,
             (e.g. E_DEC_BAD_NUM), we have to initialize decimal_value to zero.
             Note: if check_decimal() failed because of truncation,
-            decimal_value is alreay properly initialized.
+            decimal_value is already properly initialized.
           */
           my_decimal_set_zero(&decimal_value);
           /*
@@ -3457,10 +3457,9 @@ int Field_new_decimal::cmp(const uchar *a,const uchar*b)
 }
 
 
-void Field_new_decimal::sort_string(uchar *buff,
-                                    uint)
+void Field_new_decimal::sort_string(uchar *buff, uint length)
 {
-  memcpy(buff, ptr, bin_size);
+  memcpy(buff, ptr, length);
 }
 
 
@@ -4750,11 +4749,12 @@ int truncate_double(double *nr, uint field_length, uint dec,
   {
     uint order= field_length - dec;
     uint step= array_elements(log_10) - 1;
-    max_value= 1.0;
+    double max_value_by_dec= 1.0;
     for (; order > step; order-= step)
-      max_value*= log_10[step];
-    max_value*= log_10[order];
-    max_value-= 1.0 / log_10[dec];
+      max_value_by_dec*= log_10[step];
+    max_value_by_dec*= log_10[order];
+    max_value_by_dec-= 1.0 / log_10[dec];
+    set_if_smaller(max_value, max_value_by_dec);
 
     /* Check for infinity so we don't get NaN in calculations */
     if (!std::isinf(res))
@@ -5042,7 +5042,7 @@ Field_timestamp::Field_timestamp(uchar *ptr_arg, uint32 len_arg,
   {
     /*
       We mark the flag with TIMESTAMP_FLAG to indicate to the client that
-      this field will be automaticly updated on insert.
+      this field will be automatically updated on insert.
     */
     flags|= TIMESTAMP_FLAG;
     if (unireg_check != TIMESTAMP_DN_FIELD)
@@ -5799,7 +5799,9 @@ Item *Field_temporal::get_equal_const_item_datetime(THD *thd,
   case ANY_SUBST:
     if (!is_temporal_type_with_date(const_item->field_type()))
     {
-      Datetime dt(thd, const_item, Datetime::Options_cmp(thd));
+      Datetime dt= type_handler()->field_type() == MYSQL_TYPE_TIMESTAMP ?
+        Datetime(thd, const_item, Timestamp::DatetimeOptions(thd)) :
+        Datetime(thd, const_item, Datetime::Options_cmp(thd));
       if (!dt.is_valid_datetime())
         return NULL;
       return new (thd->mem_root)
@@ -7542,7 +7544,7 @@ Field_string::unpack(uchar *to, const uchar *from, const uchar *from_end,
    with the real type.  Since all allowable types have 0xF as most
    significant bits of the metadata word, lengths <256 will not affect
    the real type at all, while all other values will result in a
-   non-existant type in the range 17-244.
+   non-existent type in the range 17-244.
 
    @see Field_string::unpack
 
@@ -7646,6 +7648,17 @@ int Field_varstring::save_field_metadata(uchar *metadata_ptr)
   return 2;
 }
 
+
+bool Field_varstring::memcpy_field_possible(const Field *from) const
+{
+  return (Field_str::memcpy_field_possible(from) &&
+          !compression_method() == !from->compression_method() &&
+          length_bytes == ((Field_varstring*) from)->length_bytes &&
+          (table->file && !(table->file->ha_table_flags() &
+                            HA_RECORD_MUST_BE_CLEAN_ON_WRITE)));
+}
+
+
 int Field_varstring::store(const char *from,size_t length,CHARSET_INFO *cs)
 {
   DBUG_ASSERT(marked_for_write_or_computed());
@@ -7708,8 +7721,16 @@ my_decimal *Field_varstring::val_decimal(my_decimal *decimal_value)
 }
 
 
-int Field_varstring::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
-                             uint max_len)
+#ifdef HAVE_valgrind
+void Field_varstring::mark_unused_memory_as_defined()
+{
+  uint used_length= get_length();
+  MEM_MAKE_DEFINED(get_data() + used_length, field_length - used_length);
+}
+#endif
+
+
+int Field_varstring::cmp(const uchar *a_ptr, const uchar *b_ptr)
 {
   uint a_length, b_length;
   int diff;
@@ -7724,8 +7745,8 @@ int Field_varstring::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
     a_length= uint2korr(a_ptr);
     b_length= uint2korr(b_ptr);
   }
-  set_if_smaller(a_length, max_len);
-  set_if_smaller(b_length, max_len);
+  set_if_smaller(a_length, field_length);
+  set_if_smaller(b_length, field_length);
   diff= field_charset->coll->strnncollsp(field_charset,
                                          a_ptr+
                                          length_bytes,
@@ -7734,6 +7755,43 @@ int Field_varstring::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
                                          length_bytes,
                                          b_length);
   return diff;
+}
+
+
+static int cmp_str_prefix(const uchar *ua, size_t alen, const uchar *ub,
+                          size_t blen, size_t prefix, CHARSET_INFO *cs)
+{
+  const char *a= (char*)ua, *b= (char*)ub;
+  MY_STRCOPY_STATUS status;
+  prefix/= cs->mbmaxlen;
+  alen= cs->cset->well_formed_char_length(cs, a, a + alen, prefix, &status);
+  blen= cs->cset->well_formed_char_length(cs, b, b + blen, prefix, &status);
+  return cs->coll->strnncollsp(cs, ua, alen, ub, blen);
+}
+
+
+
+int Field_varstring::cmp_prefix(const uchar *a_ptr, const uchar *b_ptr,
+                                size_t prefix_len)
+{
+  /* avoid expensive well_formed_char_length if possible */
+  if (prefix_len == table->field[field_index]->field_length)
+    return Field_varstring::cmp(a_ptr, b_ptr);
+
+  size_t a_length, b_length;
+
+  if (length_bytes == 1)
+  {
+    a_length= *a_ptr;
+    b_length= *b_ptr;
+  }
+  else
+  {
+    a_length= uint2korr(a_ptr);
+    b_length= uint2korr(b_ptr);
+  }
+  return cmp_str_prefix(a_ptr+length_bytes, a_length, b_ptr+length_bytes,
+                        b_length, prefix_len, field_charset);
 }
 
 
@@ -8241,8 +8299,7 @@ longlong Field_varstring_compressed::val_int(void)
 }
 
 
-int Field_varstring_compressed::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
-                                        uint max_len)
+int Field_varstring_compressed::cmp(const uchar *a_ptr, const uchar *b_ptr)
 {
   String a, b;
   uint a_length, b_length;
@@ -8260,11 +8317,6 @@ int Field_varstring_compressed::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
 
   uncompress(&a, &a, a_ptr + length_bytes, a_length);
   uncompress(&b, &b, b_ptr + length_bytes, b_length);
-
-  if (a.length() > max_len)
-    a.length(max_len);
-  if (b.length() > max_len)
-    b.length(max_len);
 
   return sortcmp(&a, &b, field_charset);
 }
@@ -8500,16 +8552,24 @@ int Field_blob::cmp(const uchar *a,uint32 a_length, const uchar *b,
 }
 
 
-int Field_blob::cmp_max(const uchar *a_ptr, const uchar *b_ptr,
-                        uint max_length)
+int Field_blob::cmp(const uchar *a_ptr, const uchar *b_ptr)
 {
   uchar *blob1,*blob2;
   memcpy(&blob1, a_ptr+packlength, sizeof(char*));
   memcpy(&blob2, b_ptr+packlength, sizeof(char*));
-  uint a_len= get_length(a_ptr), b_len= get_length(b_ptr);
-  set_if_smaller(a_len, max_length);
-  set_if_smaller(b_len, max_length);
-  return Field_blob::cmp(blob1,a_len,blob2,b_len);
+  size_t a_len= get_length(a_ptr), b_len= get_length(b_ptr);
+  return cmp(blob1, (uint32)a_len, blob2, (uint32)b_len);
+}
+
+
+int Field_blob::cmp_prefix(const uchar *a_ptr, const uchar *b_ptr,
+                           size_t prefix_len)
+{
+  uchar *blob1,*blob2;
+  memcpy(&blob1, a_ptr+packlength, sizeof(char*));
+  memcpy(&blob2, b_ptr+packlength, sizeof(char*));
+  size_t a_len= get_length(a_ptr), b_len= get_length(b_ptr);
+  return cmp_str_prefix(blob1, a_len, blob2, b_len, prefix_len, field_charset);
 }
 
 
@@ -9976,7 +10036,7 @@ my_decimal *Field_bit::val_decimal(my_decimal *deciaml_value)
     The a and b pointer must be pointers to the field in a record
     (not the table->record[0] necessarily)
 */
-int Field_bit::cmp_max(const uchar *a, const uchar *b, uint max_len)
+int Field_bit::cmp_prefix(const uchar *a, const uchar *b, size_t prefix_len)
 {
   my_ptrdiff_t a_diff= a - ptr;
   my_ptrdiff_t b_diff= b - ptr;
@@ -10459,6 +10519,19 @@ void Column_definition::set_attributes(const Lex_field_type_st &type,
 
   set_handler(type.type_handler());
   charset= cs;
+
+#if MYSQL_VERSION_ID > 100500
+#error When merging to 10.5, please move the code below to
+#error Type_handler_timestamp_common::Column_definition_set_attributes()
+#else
+  /*
+    Unlike other types TIMESTAMP fields are NOT NULL by default.
+    Unless --explicit-defaults-for-timestamp is given.
+  */
+  if (!opt_explicit_defaults_for_timestamp &&
+      type.type_handler()->field_type() == MYSQL_TYPE_TIMESTAMP)
+    flags|= NOT_NULL_FLAG;
+#endif
 
   if (type.length())
   {
@@ -11169,14 +11242,16 @@ void Field::set_datetime_warning(Sql_condition::enum_warning_level level,
   if (thd->really_abort_on_warning() && level >= Sql_condition::WARN_LEVEL_WARN)
   {
     /*
-      field_str.name can be NULL when field is not in the select list:
+      field_name.str can be NULL when field is not in the select list:
         SET SESSION SQL_MODE= 'STRICT_ALL_TABLES,NO_ZERO_DATE';
         CREATE OR REPLACE TABLE t2 SELECT 1 AS f FROM t1 GROUP BY FROM_DAYS(d);
       Can't call push_warning_truncated_value_for_field() directly here,
       as it expect a non-NULL name.
     */
     thd->push_warning_wrong_or_truncated_value(level, false, typestr,
-                                               str->ptr(), table->s,
+                                               str->ptr(),
+                                               table->s->db.str,
+                                               table->s->table_name.str,
                                                field_name.str);
   }
   else
@@ -11255,6 +11330,13 @@ bool Field::validate_value_in_record_with_warn(THD *thd, const uchar *record)
 bool Field::save_in_field_default_value(bool view_error_processing)
 {
   THD *thd= table->in_use;
+
+  /*
+     TODO: MDEV-19597 Refactor TABLE::vers_update_fields() via stored virtual columns
+     This condition will go away as well as other conditions with vers_sys_field().
+  */
+  if (vers_sys_field())
+    return false;
 
   if (unlikely(flags & NO_DEFAULT_VALUE_FLAG &&
                real_type() != MYSQL_TYPE_ENUM))
@@ -11383,6 +11465,46 @@ void Field_blob::print_key_value(String *out, uint32 length)
 }
 
 
+/*
+  @brief Print value of the key part
+
+  @param
+    out                Output string
+    key                value of the key
+    length             Length of field in bytes,
+                       excluding NULL flag and length bytes
+*/
+
+
+void
+Field::print_key_part_value(String *out, const uchar* key, uint32 length)
+{
+  StringBuffer<128> tmp(system_charset_info);
+  uint null_byte= 0;
+  if (real_maybe_null())
+  {
+    /*
+      Byte 0 of key is the null-byte. If set, key is NULL.
+      Otherwise, print the key value starting immediately after the
+      null-byte
+    */
+    if (*key)
+    {
+      out->append(STRING_WITH_LEN("NULL"));
+      return;
+    }
+    null_byte++;  // Skip null byte
+  }
+
+  set_key_image(key + null_byte, length);
+  print_key_value(&tmp, length);
+  if (charset() == &my_charset_bin)
+    out->append(tmp.ptr(), tmp.length(), tmp.charset());
+  else
+    tmp.print(out, system_charset_info);
+}
+
+
 void Field::print_key_value_binary(String *out, const uchar* key, uint32 length)
 {
   out->append_semi_hex((const char*)key, length, charset());
@@ -11396,7 +11518,7 @@ Virtual_column_info* Virtual_column_info::clone(THD *thd)
     return NULL;
   if (expr)
   {
-    dst->expr= expr->get_copy(thd);
+    dst->expr= expr->build_clone(thd);
     if (!dst->expr)
       return NULL;
   }

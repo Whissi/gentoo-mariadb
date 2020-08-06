@@ -33,7 +33,7 @@ Created 10/25/1995 Heikki Tuuri
 
 #include "log0recv.h"
 #include "dict0types.h"
-#include "intrusive_list.h"
+#include "ilist.h"
 #ifdef UNIV_LINUX
 # include <set>
 #endif
@@ -82,8 +82,8 @@ struct fil_node_t;
 
 /** Tablespace or log data space */
 #ifndef UNIV_INNOCHECKSUM
-struct fil_space_t : intrusive::list_node<unflushed_spaces_tag_t>,
-                     intrusive::list_node<rotation_list_tag_t>
+struct fil_space_t : ilist_node<unflushed_spaces_tag_t>,
+                     ilist_node<rotation_list_tag_t>
 #else
 struct fil_space_t
 #endif
@@ -134,6 +134,8 @@ struct fil_space_t
 				/*!< recovered tablespace size in pages;
 				0 if no size change was read from the redo log,
 				or if the size change was implemented */
+  /** the committed size of the tablespace in pages */
+  Atomic_relaxed<ulint> committed_size;
 	ulint		n_reserved_extents;
 				/*!< number of reserved free extents for
 				ongoing operations like B-tree page split */
@@ -160,17 +162,17 @@ struct fil_space_t
 	UT_LIST_NODE_T(fil_space_t) named_spaces;
 				/*!< list of spaces for which MLOG_FILE_NAME
 				records have been issued */
-	/** Checks that this tablespace in a list of unflushed tablespaces.
-	@return true if in a list */
-	bool is_in_unflushed_spaces() const;
 	UT_LIST_NODE_T(fil_space_t) space_list;
 				/*!< list of all spaces */
-	/** Checks that this tablespace needs key rotation.
-	@return true if in a rotation list */
-	bool is_in_rotation_list() const;
 
 	/** MariaDB encryption data */
 	fil_space_crypt_t* crypt_data;
+
+	/** Checks that this tablespace in a list of unflushed tablespaces. */
+	bool is_in_unflushed_spaces;
+
+	/** Checks that this tablespace needs key rotation. */
+	bool is_in_rotation_list;
 
 	/** True if the device this filespace is on supports atomic writes */
 	bool		atomic_write_supported;
@@ -183,6 +185,15 @@ struct fil_space_t
 
 	/** @return whether the tablespace is about to be dropped */
 	bool is_stopping() const { return stop_new_ops;	}
+
+  /** Clamp a page number for batched I/O, such as read-ahead.
+  @param offset   page number limit
+  @return offset clamped to the tablespace size */
+  ulint max_page_number_for_io(ulint offset) const
+  {
+    const ulint limit= committed_size;
+    return limit > offset ? offset : limit;
+  }
 
 	/** @return whether doublewrite buffering is needed */
 	bool use_doublewrite() const
@@ -933,7 +944,7 @@ public:
 					not put to this list: they are opened
 					after the startup, and kept open until
 					shutdown */
-	intrusive::list<fil_space_t, unflushed_spaces_tag_t> unflushed_spaces;
+	sized_ilist<fil_space_t, unflushed_spaces_tag_t> unflushed_spaces;
 					/*!< list of those
 					tablespaces whose files contain
 					unflushed writes; those spaces have
@@ -954,7 +965,7 @@ public:
 					record has been written since
 					the latest redo log checkpoint.
 					Protected only by log_sys.mutex. */
-	intrusive::list<fil_space_t, rotation_list_tag_t> rotation_list;
+	ilist<fil_space_t, rotation_list_tag_t> rotation_list;
 					/*!< list of all file spaces needing
 					key rotation.*/
 
@@ -993,15 +1004,6 @@ public:
 extern fil_system_t	fil_system;
 
 #include "fil0crypt.h"
-
-/** Returns the latch of a file space.
-@param[in]	id	space id
-@param[out]	flags	tablespace flags
-@return latch protecting storage allocation */
-rw_lock_t*
-fil_space_get_latch(
-	ulint	id,
-	ulint*	flags);
 
 /** Create a space memory object and put it to the fil_system hash table.
 Error messages are issued to the server log.
@@ -1177,13 +1179,6 @@ fil_space_t*
 fil_space_keyrotate_next(fil_space_t* prev_space, bool remove)
 	MY_ATTRIBUTE((warn_unused_result));
 
-/********************************************************//**
-Creates the database directory for a table if it does not exist yet. */
-void
-fil_create_directory_for_tablename(
-/*===============================*/
-	const char*	name);	/*!< in: name in the standard
-				'databasename/tablename' format */
 /** Replay a file rename operation if possible.
 @param[in]	space_id	tablespace identifier
 @param[in]	first_page_no	first page number in the file

@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2018, MariaDB Corporation.
+Copyright (c) 2017, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -253,7 +253,6 @@ enum latch_level_t {
 	SYNC_IBUF_HEADER,
 	SYNC_DICT_HEADER,
 	SYNC_STATS_AUTO_RECALC,
-	SYNC_DICT_AUTOINC_MUTEX,
 	SYNC_DICT,
 	SYNC_FTS_CACHE,
 
@@ -282,7 +281,6 @@ enum latch_level_t {
 up its meta-data. See sync0debug.c. */
 enum latch_id_t {
 	LATCH_ID_NONE = 0,
-	LATCH_ID_AUTOINC,
 	LATCH_ID_BUF_BLOCK_MUTEX,
 	LATCH_ID_BUF_POOL,
 	LATCH_ID_BUF_POOL_ZIP,
@@ -314,7 +312,6 @@ enum latch_id_t {
 	LATCH_ID_REDO_RSEG,
 	LATCH_ID_NOREDO_RSEG,
 	LATCH_ID_RW_LOCK_DEBUG,
-	LATCH_ID_RTR_SSN_MUTEX,
 	LATCH_ID_RTR_ACTIVE_MUTEX,
 	LATCH_ID_RTR_MATCH_MUTEX,
 	LATCH_ID_RTR_PATH_MUTEX,
@@ -336,7 +333,6 @@ enum latch_id_t {
 	LATCH_ID_EVENT_MANAGER,
 	LATCH_ID_EVENT_MUTEX,
 	LATCH_ID_SYNC_ARRAY_MUTEX,
-	LATCH_ID_ZIP_PAD_MUTEX,
 	LATCH_ID_OS_AIO_READ_MUTEX,
 	LATCH_ID_OS_AIO_WRITE_MUTEX,
 	LATCH_ID_OS_AIO_LOG_MUTEX,

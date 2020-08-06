@@ -353,14 +353,13 @@ trx_t *trx_create()
 {
 	trx_t*	trx = trx_pools->get();
 
-	assert_trx_is_free(trx);
+	trx->assert_freed();
 
 	mem_heap_t*	heap;
 	ib_alloc_t*	alloc;
 
 	/* We just got trx from pool, it should be non locking */
 	ut_ad(trx->will_lock == 0);
-	ut_ad(trx->state == TRX_STATE_NOT_STARTED);
 	ut_ad(!trx->rw_trx_hash_pins);
 
 	DBUG_LOG("trx", "Create: " << trx);
@@ -383,7 +382,7 @@ trx_t *trx_create()
 	ut_ad(UT_LIST_GET_LEN(trx->lock.evicted_tables) == 0);
 
 #ifdef WITH_WSREP
-	trx->wsrep_event = NULL;
+	trx->wsrep_event= NULL;
 #endif /* WITH_WSREP */
 
 	trx_sys.register_trx(trx);
@@ -402,9 +401,8 @@ void trx_free(trx_t*& trx)
 	ut_ad(!trx->mysql_n_tables_locked);
 	ut_ad(!trx->internal);
 
-	if (trx->declared_to_be_inside_innodb) {
-
-		ib::error() << "Freeing a trx (" << trx << ", "
+	if (UNIV_UNLIKELY(trx->declared_to_be_inside_innodb)) {
+		ib::error() << "Freeing a trx ("
 			<< trx_get_id_for_print(trx) << ") which is declared"
 			" to be processing inside InnoDB";
 
@@ -431,11 +429,11 @@ void trx_free(trx_t*& trx)
 	}
 
 	trx->dict_operation = TRX_DICT_OP_NONE;
-	assert_trx_is_inactive(trx);
+	ut_ad(!trx->dict_operation_lock_mode);
 
 	trx_sys.deregister_trx(trx);
 
-	assert_trx_is_free(trx);
+	trx->assert_freed();
 
 	trx_sys.rw_trx_hash.put_pins(trx);
 	trx->mysql_thd = 0;
@@ -456,12 +454,25 @@ void trx_free(trx_t*& trx)
 	ut_ad(trx->will_lock == 0);
 
 	trx_pools->mem_free(trx);
+#ifdef __SANITIZE_ADDRESS__
 	/* Unpoison the memory for innodb_monitor_set_option;
 	it is operating also on the freed transaction objects. */
-	MEM_UNDEFINED(&trx->mutex, sizeof trx->mutex);
-	/* Declare the contents as initialized for Valgrind;
-	we checked that it was initialized in trx_pools->mem_free(trx). */
-	UNIV_MEM_VALID(&trx->mutex, sizeof trx->mutex);
+	MEM_MAKE_ADDRESSABLE(&trx->mutex, sizeof trx->mutex);
+	/* For innobase_kill_connection() */
+	MEM_MAKE_ADDRESSABLE(&trx->state, sizeof trx->state);
+	MEM_MAKE_ADDRESSABLE(&trx->mysql_thd, sizeof trx->mysql_thd);
+#endif
+	/* Unpoison the memory for innodb_monitor_set_option;
+	it is operating also on the freed transaction objects.
+	We checked that these were initialized in
+	trx_pools->mem_free(trx). */
+	MEM_MAKE_DEFINED(&trx->mutex, sizeof trx->mutex);
+	/* For innobase_kill_connection() */
+# ifdef WITH_WSREP
+	MEM_MAKE_DEFINED(&trx->wsrep, sizeof trx->wsrep);
+# endif
+	MEM_MAKE_DEFINED(&trx->state, sizeof trx->state);
+	MEM_MAKE_DEFINED(&trx->mysql_thd, sizeof trx->mysql_thd);
 
 	trx = NULL;
 }
@@ -826,14 +837,9 @@ static trx_rseg_t* trx_assign_rseg_low()
 
 	/* Choose a rollback segment evenly distributed between 0 and
 	innodb_undo_logs-1 in a round-robin fashion, skipping those
-	undo tablespaces that are scheduled for truncation.
-
-	Because rseg_slot is not protected by atomics or any mutex, race
-	conditions are possible, meaning that multiple transactions
-	that start modifications concurrently will write their undo
-	log to the same rollback segment. */
-	static ulong	rseg_slot;
-	ulint		slot = rseg_slot++ % srv_undo_logs;
+	undo tablespaces that are scheduled for truncation. */
+	static Atomic_counter<unsigned>	rseg_slot;
+	ulong	slot = ulong{rseg_slot++} % srv_undo_logs;
 	trx_rseg_t*	rseg;
 
 #ifdef UNIV_DEBUG
@@ -925,11 +931,8 @@ trx_t::assign_temp_rseg()
 	compile_time_assert(ut_is_2pow(TRX_SYS_N_RSEGS));
 
 	/* Choose a temporary rollback segment between 0 and 127
-	in a round-robin fashion. Because rseg_slot is not protected by
-	atomics or any mutex, race conditions are possible, meaning that
-	multiple transactions that start modifications concurrently
-	will write their undo log to the same rollback segment. */
-	static ulong	rseg_slot;
+	in a round-robin fashion. */
+	static Atomic_counter<unsigned> rseg_slot;
 	trx_rseg_t*	rseg = trx_sys.temp_rsegs[
 		rseg_slot++ & (TRX_SYS_N_RSEGS - 1)];
 	ut_ad(!rseg->is_persistent());
@@ -1285,7 +1288,8 @@ trx_update_mod_tables_timestamp(
 		dict_table_t* table = it->first;
 		table->update_time = now;
 #ifdef UNIV_DEBUG
-		if (preserve_tables || table->get_ref_count()) {
+		if (preserve_tables || table->get_ref_count()
+		    || UT_LIST_GET_LEN(table->locks)) {
 			/* do not evict when committing DDL operations
 			or if some other transaction is holding the
 			table handle */
@@ -1294,7 +1298,11 @@ trx_update_mod_tables_timestamp(
 		/* recheck while holding the mutex that blocks
 		table->acquire() */
 		mutex_enter(&dict_sys.mutex);
-		if (!table->get_ref_count()) {
+		mutex_enter(&lock_sys.mutex);
+		const bool do_evict = !table->get_ref_count()
+			&& !UT_LIST_GET_LEN(table->locks);
+		mutex_exit(&lock_sys.mutex);
+		if (do_evict) {
 			dict_sys.remove(table, true);
 		}
 		mutex_exit(&dict_sys.mutex);
@@ -1477,11 +1485,6 @@ inline void trx_t::commit_in_memory(const mtr_t *mtr)
       must_flush_log_later= true;
     else if (srv_flush_log_at_trx_commit)
       trx_flush_log_if_needed(commit_lsn, this);
-
-    /* Tell server some activity has happened, since the trx does
-    changes something. Background utility threads like master thread,
-    purge thread or page_cleaner thread might have some work to do. */
-    srv_active_wake_master_thread();
   }
 
   ut_ad(!rsegs.m_noredo.undo);
@@ -1494,13 +1497,6 @@ inline void trx_t::commit_in_memory(const mtr_t *mtr)
   if (fts_trx)
     trx_finalize_for_fts(this, undo_no != 0);
 
-  trx_mutex_enter(this);
-  dict_operation= TRX_DICT_OP_NONE;
-  lock.was_chosen_as_deadlock_victim= false;
-
-  DBUG_LOG("trx", "Commit in memory: " << this);
-  state= TRX_STATE_NOT_STARTED;
-
 #ifdef WITH_WSREP
   /* Serialization history has been written and the transaction is
   committed in memory, which makes this commit ordered. Release commit
@@ -1510,9 +1506,15 @@ inline void trx_t::commit_in_memory(const mtr_t *mtr)
     wsrep= false;
     wsrep_commit_ordered(mysql_thd);
   }
+  lock.was_chosen_as_wsrep_victim= false;
 #endif /* WITH_WSREP */
+  trx_mutex_enter(this);
+  dict_operation= TRX_DICT_OP_NONE;
 
-  assert_trx_is_free(this);
+  DBUG_LOG("trx", "Commit in memory: " << this);
+  state= TRX_STATE_NOT_STARTED;
+
+  assert_freed();
   trx_init(this);
   trx_mutex_exit(this);
 

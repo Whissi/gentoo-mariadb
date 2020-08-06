@@ -25,6 +25,19 @@ ERROR HY000: Table 'procs_priv' was not locked with LOCK TABLES
 REVOKE PROCESS ON *.* FROM u;
 ERROR HY000: Table 'db' was not locked with LOCK TABLES
 DROP TABLE t1;
+create database mysqltest1;
+use mysqltest1;
+create table t1(id int);
+insert t1 values(2);
+create user u1@localhost;
+grant select on mysqltest1.t1 to u1@localhost;
+grant update on mysqltest1.* to u1@localhost;
+connect u1, localhost, u1;
+update mysqltest1.t1 set id=1 where id=2;
+connection default;
+disconnect u1;
+drop user u1@localhost;
+drop database mysqltest1;
 #
 # MDEV-20076: SHOW GRANTS does not quote role names properly
 #
@@ -225,4 +238,27 @@ drop user twg@'%';
 insert mysql.tables_priv (host,db,user,table_name,grantor,table_priv) values ('localhost','','otto','t1','root@localhost','select');
 flush privileges;
 delete from mysql.tables_priv where db='';
+create database db;
+create table db.t1 (a int);
+insert into db.t1 values (1);
+create user foo;
+grant delete on db.* to foo;
+connect  con1,localhost,foo,,;
+show create table db.t1;
+Table	Create Table
+t1	CREATE TABLE `t1` (
+  `a` int(11) DEFAULT NULL
+) ENGINE=MyISAM DEFAULT CHARSET=latin1
+delete from db.t1 returning *;
+ERROR 42000: SELECT command denied to user 'foo'@'localhost' for column 'a' in table 't1'
+disconnect con1;
+connection default;
+drop database db;
+drop user foo;
+call mtr.add_suppression('mysql.host table is damaged');
+create table mysql.host (c1 int);
+insert mysql.host values (1);
+flush privileges;
+ERROR HY000: Fatal error: mysql.host table is damaged or in unsupported 3.20 format
+drop table mysql.host;
 # End of 10.4 tests

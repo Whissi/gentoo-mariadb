@@ -296,14 +296,9 @@ fil_space_crypt_t* fil_space_read_crypt_data(ulint zip_size, const byte* page)
 	      type == CRYPT_SCHEME_1)
 	    || iv_length != sizeof crypt_data->iv) {
 		ib::error() << "Found non sensible crypt scheme: "
-			    << type << "," << iv_length << " for space: "
-			    << page_get_space_id(page) << " offset: "
-			    << offset << " bytes: ["
-			    << page[offset + 2 + MAGIC_SZ]
-			    << page[offset + 3 + MAGIC_SZ]
-			    << page[offset + 4 + MAGIC_SZ]
-			    << page[offset + 5 + MAGIC_SZ]
-			    << "].";
+			    << type << "," << iv_length
+			    << " for space: "
+			    << page_get_space_id(page);
 		return NULL;
 	}
 
@@ -894,8 +889,10 @@ static bool fil_space_decrypt_for_non_full_checksum(
 		}
 
 		ib::fatal() << "Unable to decrypt data-block "
-			    << " src: " << src << "srclen: "
-			    << srclen << " buf: " << dst << "buflen: "
+			    << " src: " << static_cast<const void*>(src)
+			    << "srclen: "
+			    << srclen << " buf: "
+			    << static_cast<const void*>(dst) << "buflen: "
 			    << dstlen << " return-code: " << rc
 			    << " Can't continue!";
 	}
@@ -1277,6 +1274,7 @@ struct rotate_thread_t {
 		case SRV_SHUTDOWN_EXIT_THREADS:
 			/* srv_init_abort() must have been invoked */
 		case SRV_SHUTDOWN_CLEANUP:
+		case SRV_SHUTDOWN_INITIATED:
 			return true;
 		case SRV_SHUTDOWN_FLUSH_PHASE:
 		case SRV_SHUTDOWN_LAST_PHASE:
@@ -2447,7 +2445,7 @@ static void fil_crypt_rotation_list_fill()
 	     space != NULL;
 	     space = UT_LIST_GET_NEXT(space_list, space)) {
 		if (space->purpose != FIL_TYPE_TABLESPACE
-		    || space->is_in_rotation_list()
+		    || space->is_in_rotation_list
 		    || space->is_stopping()
 		    || UT_LIST_GET_LEN(space->chain) == 0) {
 			continue;
@@ -2494,6 +2492,7 @@ static void fil_crypt_rotation_list_fill()
 		}
 
 		fil_system.rotation_list.push_back(*space);
+		space->is_in_rotation_list = true;
 	}
 }
 

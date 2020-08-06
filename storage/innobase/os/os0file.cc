@@ -2121,14 +2121,14 @@ AIO::linux_create_io_ctx(
 			}
 
 			/* Have tried enough. Better call it a day. */
-			ib::error()
+			ib::warn()
 				<< "io_setup() failed with EAGAIN after "
 				<< OS_AIO_IO_SETUP_RETRY_ATTEMPTS
 				<< " attempts.";
 			break;
 
 		case -ENOSYS:
-			ib::error()
+			ib::warn()
 				<< "Linux Native AIO interface"
 				" is not supported on this platform. Please"
 				" check your OS documentation and install"
@@ -2137,7 +2137,7 @@ AIO::linux_create_io_ctx(
 			break;
 
 		default:
-			ib::error()
+			ib::warn()
 				<< "Linux Native AIO setup"
 				<< " returned following error["
 				<< ret << "]";
@@ -5294,7 +5294,7 @@ fallback:
 			? 0 : posix_fallocate(file, current_size,
 					      size - current_size);
 	} while (err == EINTR
-		 && srv_shutdown_state == SRV_SHUTDOWN_NONE);
+		 && srv_shutdown_state <= SRV_SHUTDOWN_INITIATED);
 
 	switch (err) {
 	case 0:
@@ -5332,7 +5332,7 @@ fallback:
 	os_offset_t	current_size = os_file_get_size(file);
 
 	while (current_size < size
-	       && srv_shutdown_state == SRV_SHUTDOWN_NONE) {
+	       && srv_shutdown_state <= SRV_SHUTDOWN_INITIATED) {
 		ulint	n_bytes;
 
 		if (size - current_size < (os_offset_t) buf_size) {
@@ -7839,13 +7839,17 @@ invalid:
 		space->flags = (space->flags & FSP_FLAGS_MEM_MASK) | flags;
 
 		this->size = ulint(size_bytes / psize);
-		space->size += this->size;
+		space->committed_size = space->size += this->size;
 	} else if (space->id != TRX_SYS_SPACE || space->size_in_header) {
 		/* If this is not the first-time open, do nothing.
 		For the system tablespace, we always get invoked as
 		first=false, so we detect the true first-time-open based
-		on size_in_header and proceed to initiailze the data. */
+		on size_in_header and proceed to initialize the data. */
 		return true;
+	} else {
+		/* Initialize the size of predefined tablespaces
+		to FSP_SIZE. */
+		space->committed_size = size;
 	}
 
 	ut_ad(space->free_limit == 0 || space->free_limit == free_limit);

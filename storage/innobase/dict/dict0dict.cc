@@ -985,7 +985,7 @@ inline void dict_sys_t::add(dict_table_t* table)
 
 	ulint fold = ut_fold_string(table->name.m_name);
 
-	mutex_create(LATCH_ID_AUTOINC, &table->autoinc_mutex);
+	new (&table->autoinc_mutex) std::mutex();
 
 	/* Look for a table with the same name: error if such exists */
 	{
@@ -1057,25 +1057,12 @@ dict_table_can_be_evicted(
 		}
 
 #ifdef BTR_CUR_HASH_ADAPT
+		/* We cannot really evict the table if adaptive hash
+		index entries are pointing to any of its indexes. */
 		for (dict_index_t* index = dict_table_get_first_index(table);
 		     index != NULL;
 		     index = dict_table_get_next_index(index)) {
-
-			btr_search_t*	info = btr_search_get_info(index);
-
-			/* We are not allowed to free the in-memory index
-			struct dict_index_t until all entries in the adaptive
-			hash index that point to any of the page belonging to
-			his b-tree index are dropped. This is so because
-			dropping of these entries require access to
-			dict_index_t struct. To avoid such scenario we keep
-			a count of number of such pages in the search_info and
-			only free the dict_index_t struct when this count
-			drops to zero.
-
-			See also: dict_index_remove_from_cache_low() */
-
-			if (btr_search_info_get_ref_count(info, index) > 0) {
+			if (index->n_ahi_pages()) {
 				return(FALSE);
 			}
 		}
@@ -1086,6 +1073,71 @@ dict_table_can_be_evicted(
 
 	return(FALSE);
 }
+
+#ifdef BTR_CUR_HASH_ADAPT
+/** @return a clone of this */
+dict_index_t *dict_index_t::clone() const
+{
+  ut_ad(n_fields);
+  ut_ad(!(type & (DICT_IBUF | DICT_SPATIAL | DICT_FTS)));
+  ut_ad(online_status == ONLINE_INDEX_COMPLETE);
+  ut_ad(is_committed());
+  ut_ad(!is_dummy);
+  ut_ad(!parser);
+  ut_ad(!index_fts_syncing);
+  ut_ad(!online_log);
+  ut_ad(!rtr_track);
+
+  const size_t size= sizeof *this + n_fields * sizeof(*fields) +
+#ifdef BTR_CUR_ADAPT
+    sizeof *search_info +
+#endif
+    1 + strlen(name) +
+    n_uniq * (sizeof *stat_n_diff_key_vals +
+              sizeof *stat_n_sample_sizes +
+              sizeof *stat_n_non_null_key_vals);
+
+  mem_heap_t* heap= mem_heap_create(size);
+  dict_index_t *index= static_cast<dict_index_t*>(mem_heap_dup(heap, this,
+                                                               sizeof *this));
+  *index= *this;
+  rw_lock_create(index_tree_rw_lock_key, &index->lock, SYNC_INDEX_TREE);
+  index->heap= heap;
+  index->name= mem_heap_strdup(heap, name);
+  index->fields= static_cast<dict_field_t*>
+    (mem_heap_dup(heap, fields, n_fields * sizeof *fields));
+#ifdef BTR_CUR_ADAPT
+  index->search_info= btr_search_info_create(index->heap);
+#endif /* BTR_CUR_ADAPT */
+  index->stat_n_diff_key_vals= static_cast<ib_uint64_t*>
+    (mem_heap_zalloc(heap, n_uniq * sizeof *stat_n_diff_key_vals));
+  index->stat_n_sample_sizes= static_cast<ib_uint64_t*>
+    (mem_heap_zalloc(heap, n_uniq * sizeof *stat_n_sample_sizes));
+  index->stat_n_non_null_key_vals= static_cast<ib_uint64_t*>
+    (mem_heap_zalloc(heap, n_uniq * sizeof *stat_n_non_null_key_vals));
+  new (&index->zip_pad.mutex) std::mutex();
+  return index;
+}
+
+/** Clone this index for lazy dropping of the adaptive hash.
+@return this or a clone */
+dict_index_t *dict_index_t::clone_if_needed()
+{
+  if (!search_info->ref_count)
+    return this;
+  dict_index_t *prev= UT_LIST_GET_PREV(indexes, this);
+
+  UT_LIST_REMOVE(table->indexes, this);
+  UT_LIST_ADD_LAST(table->freed_indexes, this);
+  dict_index_t *index= clone();
+  set_freed();
+  if (prev)
+    UT_LIST_INSERT_AFTER(table->indexes, prev, index);
+  else
+    UT_LIST_ADD_FIRST(table->indexes, index);
+  return index;
+}
+#endif /* BTR_CUR_HASH_ADAPT */
 
 /**********************************************************************//**
 Make room in the table cache by evicting an unused table. The unused table
@@ -1725,11 +1777,21 @@ void dict_sys_t::remove(dict_table_t* table, bool lru, bool keep)
 		UT_DELETE(table->vc_templ);
 	}
 
-	mutex_free(&table->autoinc_mutex);
+	table->autoinc_mutex.~mutex();
 
-	if (!keep) {
-		dict_mem_table_free(table);
+	if (keep) {
+		return;
 	}
+
+#ifdef BTR_CUR_HASH_ADAPT
+	if (UNIV_UNLIKELY(UT_LIST_GET_LEN(table->freed_indexes) != 0)) {
+		table->vc_templ = NULL;
+		table->id = 0;
+		return;
+	}
+#endif /* BTR_CUR_HASH_ADAPT */
+
+	dict_mem_table_free(table);
 }
 
 /****************************************************************//**
@@ -1907,6 +1969,10 @@ dict_index_remove_from_cache_low(
 	ut_ad(table->magic_n == DICT_TABLE_MAGIC_N);
 	ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
 	ut_ad(mutex_own(&dict_sys.mutex));
+	ut_ad(table->id);
+#ifdef BTR_CUR_HASH_ADAPT
+	ut_ad(!index->freed());
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	/* No need to acquire the dict_index_t::lock here because
 	there can't be any active operations on this index (or table). */
@@ -1916,13 +1982,22 @@ dict_index_remove_from_cache_low(
 		row_log_free(index->online_log);
 	}
 
+	/* Remove the index from the list of indexes of the table */
+	UT_LIST_REMOVE(table->indexes, index);
+
+	/* The index is being dropped, remove any compression stats for it. */
+	if (!lru_evict && DICT_TF_GET_ZIP_SSIZE(index->table->flags)) {
+		mutex_enter(&page_zip_stat_per_index_mutex);
+		page_zip_stat_per_index.erase(index->id);
+		mutex_exit(&page_zip_stat_per_index_mutex);
+	}
+
+	/* Remove the index from affected virtual column index list */
+	index->detach_columns();
+
 #ifdef BTR_CUR_HASH_ADAPT
 	/* We always create search info whether or not adaptive
 	hash index is enabled or not. */
-	btr_search_t*	info = btr_search_get_info(index);
-	ulint		retries = 0;
-	ut_ad(info);
-
 	/* We are not allowed to free the in-memory index struct
 	dict_index_t until all entries in the adaptive hash index
 	that point to any of the page belonging to his b-tree index
@@ -1932,30 +2007,14 @@ dict_index_remove_from_cache_low(
 	only free the dict_index_t struct when this count drops to
 	zero. See also: dict_table_can_be_evicted() */
 
-	do {
-		if (!btr_search_info_get_ref_count(info, index)
-		    || !buf_LRU_drop_page_hash_for_tablespace(table)) {
-			break;
-		}
-
-		ut_a(++retries < 10000);
-	} while (srv_shutdown_state == SRV_SHUTDOWN_NONE || !lru_evict);
+	if (index->n_ahi_pages()) {
+		index->set_freed();
+		UT_LIST_ADD_LAST(table->freed_indexes, index);
+		return;
+	}
 #endif /* BTR_CUR_HASH_ADAPT */
 
 	rw_lock_free(&index->lock);
-
-	/* The index is being dropped, remove any compression stats for it. */
-	if (!lru_evict && DICT_TF_GET_ZIP_SSIZE(index->table->flags)) {
-		mutex_enter(&page_zip_stat_per_index_mutex);
-		page_zip_stat_per_index.erase(index->id);
-		mutex_exit(&page_zip_stat_per_index_mutex);
-	}
-
-	/* Remove the index from the list of indexes of the table */
-	UT_LIST_REMOVE(table->indexes, index);
-
-	/* Remove the index from affected virtual column index list */
-	index->detach_columns();
 
 	dict_mem_index_free(index);
 }
@@ -4521,7 +4580,7 @@ dict_create_foreign_constraints(
 	heap = mem_heap_create(10000);
 
 	err = dict_create_foreign_constraints_low(
-		trx, heap, innobase_get_charset(trx->mysql_thd),
+		trx, heap, thd_charset(trx->mysql_thd),
 		str, name, reject_fks);
 
 	mem_heap_free(heap);
@@ -4556,7 +4615,7 @@ dict_foreign_parse_drop_constraints(
 
 	ut_a(trx->mysql_thd);
 
-	cs = innobase_get_charset(trx->mysql_thd);
+	cs = thd_charset(trx->mysql_thd);
 
 	*n = 0;
 
@@ -5248,6 +5307,7 @@ dict_set_corrupted_index_cache_only(
 	is corrupted */
 	if (dict_index_is_clust(index)) {
 		index->table->corrupted = TRUE;
+		index->table->file_unreadable = true;
 	}
 
 	index->type |= DICT_CORRUPT;
@@ -6101,10 +6161,7 @@ dict_index_zip_pad_update(
 		beyond max pad size. */
 		if (info->pad + ZIP_PAD_INCR
 		    < (srv_page_size * zip_pad_max) / 100) {
-			/* Use atomics even though we have the mutex.
-			This is to ensure that we are able to read
-			info->pad atomically. */
-			info->pad += ZIP_PAD_INCR;
+			info->pad.fetch_add(ZIP_PAD_INCR);
 
 			MONITOR_INC(MONITOR_PAD_INCREMENTS);
 		}
@@ -6121,11 +6178,7 @@ dict_index_zip_pad_update(
 		padding. */
 		if (info->n_rounds >= ZIP_PAD_SUCCESSFUL_ROUND_LIMIT
 		    && info->pad > 0) {
-
-			/* Use atomics even though we have the mutex.
-			This is to ensure that we are able to read
-			info->pad atomically. */
-			info->pad -= ZIP_PAD_INCR;
+			info->pad.fetch_sub(ZIP_PAD_INCR);
 
 			info->n_rounds = 0;
 
@@ -6148,10 +6201,10 @@ dict_index_zip_success(
 		return;
 	}
 
-	mutex_enter(&index->zip_pad.mutex);
+	index->zip_pad.mutex.lock();
 	++index->zip_pad.success;
 	dict_index_zip_pad_update(&index->zip_pad, zip_threshold);
-	mutex_exit(&index->zip_pad.mutex);
+	index->zip_pad.mutex.unlock();
 }
 
 /*********************************************************************//**
@@ -6168,10 +6221,10 @@ dict_index_zip_failure(
 		return;
 	}
 
-	mutex_enter(&index->zip_pad.mutex);
+	index->zip_pad.mutex.lock();
 	++index->zip_pad.failure;
 	dict_index_zip_pad_update(&index->zip_pad, zip_threshold);
-	mutex_exit(&index->zip_pad.mutex);
+	index->zip_pad.mutex.unlock();
 }
 
 /*********************************************************************//**

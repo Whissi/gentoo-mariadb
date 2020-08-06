@@ -4168,6 +4168,8 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
     if (key->type == Key::UNIQUE && !(key_info->flags & HA_NULL_PART_KEY))
       unique_key=1;
     key_info->key_length=(uint16) key_length;
+    if (key_info->key_length > max_key_length && key->type == Key::UNIQUE)
+      is_hash_field_needed= true;
     if (key_length > max_key_length && key->type != Key::FULLTEXT &&
         !is_hash_field_needed)
     {
@@ -4262,6 +4264,7 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
 
     if (thd->variables.sql_mode & MODE_NO_ZERO_DATE &&
         !sql_field->default_value && !sql_field->vcol_info &&
+        !sql_field->vers_sys_field() &&
         sql_field->is_timestamp_type() &&
         !opt_explicit_defaults_for_timestamp &&
         (sql_field->flags & NOT_NULL_FLAG) &&
@@ -4401,6 +4404,25 @@ bool validate_comment_length(THD *thd, LEX_CSTRING *comment, size_t max_len,
       Well_formed_prefix(system_charset_info, *comment, max_len).length();
   if (tmp_len < comment->length)
   {
+#if MARIADB_VERSION_ID < 100500
+    if (comment->length <= max_len)
+    {
+      if (thd->is_strict_mode())
+      {
+         my_error(ER_INVALID_CHARACTER_STRING, MYF(0),
+                  system_charset_info->csname, comment->str);
+         DBUG_RETURN(true);
+      }
+      push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+                          ER_INVALID_CHARACTER_STRING,
+                          ER_THD(thd, ER_INVALID_CHARACTER_STRING),
+                          system_charset_info->csname, comment->str);
+      comment->length= tmp_len;
+      DBUG_RETURN(false);
+    }
+#else
+#error do it in TEXT_STRING_sys
+#endif
     if (thd->is_strict_mode())
     {
        my_error(err_code, MYF(0), name, static_cast<ulong>(max_len));
@@ -7538,7 +7560,6 @@ static bool is_inplace_alter_impossible(TABLE *table,
   @param ha_alter_info      Structure describing ALTER TABLE to be carried
                             out and serving as a storage place for data
                             used during different phases.
-  @param inplace_supported  Enum describing the locking requirements.
   @param target_mdl_request Metadata request/lock on the target table name.
   @param alter_ctx          ALTER TABLE runtime context.
 
@@ -7563,7 +7584,6 @@ static bool mysql_inplace_alter_table(THD *thd,
                                       TABLE *table,
                                       TABLE *altered_table,
                                       Alter_inplace_info *ha_alter_info,
-                                      enum_alter_inplace_result inplace_supported,
                                       MDL_request *target_mdl_request,
                                       Alter_table_ctx *alter_ctx)
 {
@@ -7573,6 +7593,8 @@ static bool mysql_inplace_alter_table(THD *thd,
   Alter_info *alter_info= ha_alter_info->alter_info;
   bool reopen_tables= false;
   bool res;
+  const enum_alter_inplace_result inplace_supported=
+    ha_alter_info->inplace_supported;
 
   DBUG_ENTER("mysql_inplace_alter_table");
 
@@ -7909,16 +7931,13 @@ blob_length_by_type(enum_field_types type)
 }
 
 
-static void append_drop_column(THD *thd, bool dont, String *str,
-                               Field *field)
+static inline
+void append_drop_column(THD *thd, String *str, Field *field)
 {
-  if (!dont)
-  {
-    if (str->length())
-      str->append(STRING_WITH_LEN(", "));
-    str->append(STRING_WITH_LEN("DROP COLUMN "));
-    append_identifier(thd, str, &field->field_name);
-  }
+  if (str->length())
+    str->append(STRING_WITH_LEN(", "));
+  str->append(STRING_WITH_LEN("DROP COLUMN "));
+  append_identifier(thd, str, &field->field_name);
 }
 
 
@@ -8130,7 +8149,8 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
       if (field->default_value)
         field->default_value->expr->walk(&Item::rename_fields_processor, 1,
                                          &column_rename_param);
-      table->m_needs_reopen= 1; // because new column name is on thd->mem_root
+      // Force reopen because new column name is on thd->mem_root
+      table->mark_table_for_reopen();
     }
 
     /* Check if field is changed */
@@ -8173,7 +8193,7 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
              field->invisible < INVISIBLE_SYSTEM)
     {
       StringBuffer<NAME_LEN*3> tmp;
-      append_drop_column(thd, false, &tmp, field);
+      append_drop_column(thd, &tmp, field);
       my_error(ER_MISSING, MYF(0), table->s->table_name.str, tmp.c_ptr());
       goto err;
     }
@@ -8226,10 +8246,10 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
       !vers_system_invisible)
   {
     StringBuffer<NAME_LEN*3> tmp;
-    append_drop_column(thd, dropped_sys_vers_fields & VERS_SYS_START_FLAG,
-                       &tmp, table->vers_start_field());
-    append_drop_column(thd, dropped_sys_vers_fields & VERS_SYS_END_FLAG,
-                       &tmp, table->vers_end_field());
+    if (!(dropped_sys_vers_fields & VERS_SYS_START_FLAG))
+      append_drop_column(thd, &tmp, table->vers_start_field());
+    if (!(dropped_sys_vers_fields & VERS_SYS_END_FLAG))
+      append_drop_column(thd, &tmp, table->vers_end_field());
     my_error(ER_MISSING, MYF(0), table->s->table_name.str, tmp.c_ptr());
     goto err;
   }
@@ -8682,7 +8702,8 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
         {
           check->expr->walk(&Item::rename_fields_processor, 1,
                             &column_rename_param);
-          table->m_needs_reopen= 1; // because new column name is on thd->mem_root
+          // Force reopen because new column name is on thd->mem_root
+          table->mark_table_for_reopen();
         }
         new_constraint_list.push_back(check, thd->mem_root);
       }
@@ -9428,10 +9449,15 @@ bool mysql_alter_table(THD *thd, const LEX_CSTRING *new_db,
         (!create_info->db_type || /* unknown engine */
          !(create_info->db_type->flags & HTON_SUPPORT_LOG_TABLES)))
     {
+    unsupported:
       my_error(ER_UNSUPORTED_LOG_ENGINE, MYF(0),
                hton_name(create_info->db_type)->str);
       DBUG_RETURN(true);
     }
+
+    if (create_info->db_type == maria_hton &&
+        create_info->transactional != HA_CHOICE_NO)
+      goto unsupported;
 
 #ifdef WITH_PARTITION_STORAGE_ENGINE
     if (alter_info->partition_flags & ALTER_PARTITION_INFO)
@@ -10095,19 +10121,19 @@ do_continue:;
     if (alter_info->requested_lock == Alter_info::ALTER_TABLE_LOCK_NONE)
       ha_alter_info.online= true;
     // Ask storage engine whether to use copy or in-place
-    enum_alter_inplace_result inplace_supported=
+    ha_alter_info.inplace_supported=
       table->file->check_if_supported_inplace_alter(&altered_table,
                                                     &ha_alter_info);
 
-    if (alter_info->supports_algorithm(thd, inplace_supported, &ha_alter_info) ||
-        alter_info->supports_lock(thd, inplace_supported, &ha_alter_info))
+    if (alter_info->supports_algorithm(thd, &ha_alter_info) ||
+        alter_info->supports_lock(thd, &ha_alter_info))
     {
       cleanup_table_after_inplace_alter(&altered_table);
       goto err_new_table_cleanup;
     }
 
     // If SHARED lock and no particular algorithm was requested, use COPY.
-    if (inplace_supported == HA_ALTER_INPLACE_EXCLUSIVE_LOCK &&
+    if (ha_alter_info.inplace_supported == HA_ALTER_INPLACE_EXCLUSIVE_LOCK &&
         alter_info->requested_lock == Alter_info::ALTER_TABLE_LOCK_SHARED &&
          alter_info->algorithm(thd) ==
                  Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT &&
@@ -10115,7 +10141,7 @@ do_continue:;
                  Alter_info::ALTER_TABLE_ALGORITHM_DEFAULT)
       use_inplace= false;
 
-    if (inplace_supported == HA_ALTER_INPLACE_NOT_SUPPORTED)
+    if (ha_alter_info.inplace_supported == HA_ALTER_INPLACE_NOT_SUPPORTED)
       use_inplace= false;
 
     if (use_inplace)
@@ -10128,7 +10154,7 @@ do_continue:;
       */
       thd->count_cuted_fields = CHECK_FIELD_WARN;
       int res= mysql_inplace_alter_table(thd, table_list, table, &altered_table,
-                                         &ha_alter_info, inplace_supported,
+                                         &ha_alter_info,
                                          &target_mdl_request, &alter_ctx);
       thd->count_cuted_fields= save_count_cuted_fields;
       my_free(const_cast<uchar*>(frm.str));
@@ -10469,8 +10495,9 @@ err_new_table_cleanup:
     bool save_abort_on_warning= thd->abort_on_warning;
     thd->abort_on_warning= true;
     thd->push_warning_truncated_value_for_field(Sql_condition::WARN_LEVEL_WARN,
-                                                f_type, f_val, new_table
-                                                ? new_table->s : table->s,
+                                                f_type, f_val,
+                                                alter_ctx.new_db.str,
+                                                alter_ctx.new_name.str,
                                                 alter_ctx.datetime_field->
                                                 field_name.str);
     thd->abort_on_warning= save_abort_on_warning;
@@ -10583,6 +10610,7 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
   sql_mode_t save_sql_mode= thd->variables.sql_mode;
   ulonglong prev_insert_id, time_to_report_progress;
   Field **dfield_ptr= to->default_field;
+  uint save_to_s_default_fields= to->s->default_fields;
   bool make_versioned= !from->versioned() && to->versioned();
   bool make_unversioned= from->versioned() && !to->versioned();
   bool keep_versioned= from->versioned() && to->versioned();
@@ -10910,6 +10938,7 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
   *copied= found_count;
   *deleted=delete_count;
   to->file->ha_release_auto_increment();
+  to->s->default_fields= save_to_s_default_fields;
 
   if (!cleanup_done)
   {

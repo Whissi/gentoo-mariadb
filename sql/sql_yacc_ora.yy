@@ -1290,6 +1290,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %type <type_handler> int_type real_type
 
 %type <Lex_field_type> type_with_opt_collate field_type
+        qualified_field_type
         sp_param_type_with_opt_collate
         sp_param_field_type
         sp_param_field_type_string
@@ -4569,7 +4570,7 @@ sp_labeled_block:
           {
             Lex->sp_block_init(thd, &$1);
           }
-          sp_decl_body_list
+          opt_sp_decl_body_list
           {
             if (unlikely(Lex->sp_block_with_exceptions_finalize_declarations(thd)))
               MYSQL_YYABORT;
@@ -4611,7 +4612,7 @@ sp_unlabeled_block:
               MYSQL_YYABORT;
             Lex->sp_block_init(thd);
           }
-          sp_decl_body_list
+          opt_sp_decl_body_list
           {
             if (unlikely(Lex->sp_block_with_exceptions_finalize_declarations(thd)))
               MYSQL_YYABORT;
@@ -6636,10 +6637,12 @@ field_spec:
 
             lex->init_last_field(f, &$1, NULL);
             $<create_field>$= f;
+            lex->parsing_options.lookup_keywords_after_qualifier= true;
           }
           field_type_or_serial opt_check_constraint
           {
             LEX *lex=Lex;
+            lex->parsing_options.lookup_keywords_after_qualifier= false;
             $$= $<create_field>2;
 
             $$->check_constraint= $4;
@@ -6658,7 +6661,7 @@ field_spec:
         ;
 
 field_type_or_serial:
-          field_type  { Lex->last_field->set_attributes($1, Lex->charset); }
+          qualified_field_type  { Lex->last_field->set_attributes($1, Lex->charset); }
           field_def
         | SERIAL_SYM
           {
@@ -6827,6 +6830,18 @@ column_default_expr:
         | expr_or_literal
           {
             if (unlikely(!($$= add_virtual_expression(thd, $1))))
+              MYSQL_YYABORT;
+          }
+        ;
+
+qualified_field_type:
+          field_type
+          {
+            Lex->map_data_type(Lex_ident_sys(), &($$= $1));
+          }
+        | sp_decl_ident '.' field_type
+          {
+            if (Lex->map_data_type($1, &($$= $3)))
               MYSQL_YYABORT;
           }
         ;
@@ -7004,7 +7019,7 @@ field_type_temporal:
             }
             $$.set(&type_handler_year, $2);
           }
-        | DATE_SYM { $$.set(thd->type_handler_for_date()); }
+        | DATE_SYM { $$.set(&type_handler_newdate); }
         | TIME_SYM opt_field_length
           {
             $$.set(opt_mysql56_temporal_format ?
@@ -7014,31 +7029,14 @@ field_type_temporal:
           }
         | TIMESTAMP opt_field_length
           {
-            if (thd->variables.sql_mode & MODE_MAXDB)
-              $$.set(opt_mysql56_temporal_format ?
-                     static_cast<const Type_handler*>(&type_handler_datetime2) :
-                     static_cast<const Type_handler*>(&type_handler_datetime),
-                     $2);
-            else
-            {
-              /* 
-                Unlike other types TIMESTAMP fields are NOT NULL by default.
-                Unless --explicit-defaults-for-timestamp is given.
-              */
-              if (!opt_explicit_defaults_for_timestamp)
-                Lex->last_field->flags|= NOT_NULL_FLAG;
-              $$.set(opt_mysql56_temporal_format ?
-                     static_cast<const Type_handler*>(&type_handler_timestamp2):
-                     static_cast<const Type_handler*>(&type_handler_timestamp),
-                     $2);
-            }
+            $$.set(opt_mysql56_temporal_format ?
+                   static_cast<const Type_handler*>(&type_handler_timestamp2):
+                   static_cast<const Type_handler*>(&type_handler_timestamp),
+                   $2);
           }
         | DATETIME opt_field_length
           {
-            $$.set(opt_mysql56_temporal_format ?
-                   static_cast<const Type_handler*>(&type_handler_datetime2) :
-                   static_cast<const Type_handler*>(&type_handler_datetime),
-                   $2);
+            $$.set(thd->type_handler_for_datetime(), $2);
           }
         ;
 
@@ -7393,27 +7391,28 @@ with_or_without_system:
 type_with_opt_collate:
         field_type opt_collate
         {
-          $$= $1;
+          Lex->map_data_type(Lex_ident_sys(), &($$= $1));
 
           if ($2)
           {
             if (unlikely(!(Lex->charset= merge_charset_and_collation(Lex->charset, $2))))
               MYSQL_YYABORT;
           }
-          Lex->last_field->set_attributes($1, Lex->charset);
+          Lex->last_field->set_attributes($$, Lex->charset);
         }
         ;
 
 sp_param_type_with_opt_collate:
         sp_param_field_type opt_collate
         {
-          $$= $1;
+          Lex->map_data_type(Lex_ident_sys(), &($$= $1));
+            
           if ($2)
           {
             if (unlikely(!(Lex->charset= merge_charset_and_collation(Lex->charset, $2))))
               MYSQL_YYABORT;
           }
-          Lex->last_field->set_attributes($1, Lex->charset);
+          Lex->last_field->set_attributes($$, Lex->charset);
         }
         ;
 
@@ -9253,8 +9252,8 @@ adm_partition:
 cache_keys_spec:
           {
             Lex->first_select_lex()->alloc_index_hints(thd);
-            Select->set_index_hint_type(INDEX_HINT_USE,
-                                        INDEX_HINT_MASK_ALL);
+            Lex->first_select_lex()->set_index_hint_type(INDEX_HINT_USE,
+                                                         INDEX_HINT_MASK_ALL);
           }
           cache_key_list_or_empty
         ;
@@ -13869,13 +13868,13 @@ expr_or_default:
           expr { $$= $1;}
         | DEFAULT
           {
-            $$= new (thd->mem_root) Item_default_value(thd, Lex->current_context());
+            $$= new (thd->mem_root) Item_default_specification(thd);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
         | IGNORE_SYM
           {
-            $$= new (thd->mem_root) Item_ignore_value(thd, Lex->current_context());
+            $$= new (thd->mem_root) Item_ignore_specification(thd);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
@@ -16622,7 +16621,8 @@ set:
               MYSQL_YYABORT;
             lex->set_stmt_init();
             lex->var_list.empty();
-            sp_create_assignment_lex(thd, yychar == YYEMPTY);
+            if (sp_create_assignment_lex(thd, yychar == YYEMPTY))
+              MYSQL_YYABORT;
           }
           start_option_value_list
           {
@@ -16657,7 +16657,8 @@ set_assign:
             LEX *lex=Lex;
             lex->set_stmt_init();
             lex->var_list.empty();
-            sp_create_assignment_lex(thd, yychar == YYEMPTY);
+            if(sp_create_assignment_lex(thd, yychar == YYEMPTY))
+              MYSQL_YYABORT;
           }
           set_expr_or_default
           {
@@ -16670,7 +16671,8 @@ set_assign:
             LEX *lex=Lex;
             lex->set_stmt_init();
             lex->var_list.empty();
-            sp_create_assignment_lex(thd, yychar == YYEMPTY);
+            if (sp_create_assignment_lex(thd, yychar == YYEMPTY))
+              MYSQL_YYABORT;
           }
           set_expr_or_default
           {
@@ -16690,7 +16692,8 @@ set_assign:
             }
             lex->set_stmt_init();
             lex->var_list.empty();
-            sp_create_assignment_lex(thd, yychar == YYEMPTY);
+            if (sp_create_assignment_lex(thd, yychar == YYEMPTY))
+              MYSQL_YYABORT;
           }
           set_expr_or_default
           {
@@ -16760,7 +16763,8 @@ option_value_list_continued:
 /* Repeating list of option values after first option value. */
 option_value_list:
           {
-            sp_create_assignment_lex(thd, yychar == YYEMPTY);
+            if (sp_create_assignment_lex(thd, yychar == YYEMPTY))
+              MYSQL_YYABORT;
           }
           option_value
           {
@@ -16769,7 +16773,8 @@ option_value_list:
           }
         | option_value_list ','
           {
-            sp_create_assignment_lex(thd, yychar == YYEMPTY);
+            if (sp_create_assignment_lex(thd, yychar == YYEMPTY))
+              MYSQL_YYABORT;
           }
           option_value
           {
@@ -17565,7 +17570,7 @@ grant_ident:
           '*'
           {
             LEX *lex= Lex;
-            if (unlikely(lex->copy_db_to(&lex->current_select->db)))
+            if (unlikely(lex->copy_db_to(&lex->first_select_lex()->db)))
               MYSQL_YYABORT;
             if (lex->grant == GLOBAL_ACLS)
               lex->grant = DB_ACLS & ~GRANT_ACL;
@@ -17575,7 +17580,7 @@ grant_ident:
         | ident '.' '*'
           {
             LEX *lex= Lex;
-            lex->current_select->db= $1;
+            lex->first_select_lex()->db= $1;
             if (lex->grant == GLOBAL_ACLS)
               lex->grant = DB_ACLS & ~GRANT_ACL;
             else if (unlikely(lex->columns.elements))
@@ -17584,7 +17589,7 @@ grant_ident:
         | '*' '.' '*'
           {
             LEX *lex= Lex;
-            lex->current_select->db= null_clex_str;
+            lex->first_select_lex()->db= null_clex_str;
             if (lex->grant == GLOBAL_ACLS)
               lex->grant= GLOBAL_ACLS & ~GRANT_ACL;
             else if (unlikely(lex->columns.elements))
@@ -17593,7 +17598,7 @@ grant_ident:
         | table_ident
           {
             LEX *lex=Lex;
-            if (unlikely(!lex->current_select->
+            if (unlikely(!lex->first_select_lex()->
                          add_table_to_list(thd, $1,NULL,
                                            TL_OPTION_UPDATING)))
               MYSQL_YYABORT;

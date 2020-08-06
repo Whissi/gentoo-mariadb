@@ -947,11 +947,6 @@ void execute_init_command(THD *thd, LEX_STRING *init_command,
   char *buf= thd->strmake(init_command->str, len);
   mysql_rwlock_unlock(var_lock);
 
-#if defined(ENABLED_PROFILING)
-  thd->profiling.start_new_query();
-  thd->profiling.set_query_source(buf, len);
-#endif
-
   THD_STAGE_INFO(thd, stage_execution_of_init_command);
   save_client_capabilities= thd->client_capabilities;
   thd->client_capabilities|= CLIENT_MULTI_QUERIES;
@@ -966,9 +961,6 @@ void execute_init_command(THD *thd, LEX_STRING *init_command,
   thd->client_capabilities= save_client_capabilities;
   thd->net.vio= save_vio;
 
-#if defined(ENABLED_PROFILING)
-  thd->profiling.finish_current_query();
-#endif
 }
 
 
@@ -1288,6 +1280,7 @@ bool do_command(THD *thd)
   command= fetch_command(thd, packet);
 
 #ifdef WITH_WSREP
+  DEBUG_SYNC(thd, "wsrep_before_before_command");
   /*
     Aborted by background rollbacker thread.
     Handle error here and jump straight to out
@@ -1849,9 +1842,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       */
       char *beginning_of_next_stmt= (char*) parser_state.m_lip.found_semicolon;
 
-#ifdef WITH_ARIA_STORAGE_ENGINE
-    ha_maria::implicit_commit(thd, FALSE);
-#endif
+      ha_maria_implicit_commit(thd, FALSE);
 
       /* Finalize server status flags after executing a statement. */
       thd->update_server_status();
@@ -4998,6 +4989,12 @@ mysql_execute_command(THD *thd)
     if (res)
       goto error;
 
+#ifdef WITH_WSREP
+    /* Clean up the previous transaction on implicit commit. */
+    if (wsrep_on(thd) && !wsrep_not_committed(thd) && wsrep_after_statement(thd))
+      goto error;
+#endif
+
     /* We can't have any kind of table locks while backup is active */
     if (thd->current_backup_stage != BACKUP_FINISHED)
     {
@@ -6128,7 +6125,8 @@ finish:
   lex->unit.cleanup();
 
   /* close/reopen tables that were marked to need reopen under LOCK TABLES */
-  if (! thd->lex->requires_prelocking())
+  if (unlikely(thd->locked_tables_list.some_table_marked_for_reopen) &&
+      !thd->lex->requires_prelocking())
     thd->locked_tables_list.reopen_tables(thd, true);
 
   if (! thd->in_sub_stmt)
@@ -6158,9 +6156,7 @@ finish:
       trans_commit_stmt(thd);
       thd->get_stmt_da()->set_overwrite_status(false);
     }
-#ifdef WITH_ARIA_STORAGE_ENGINE
-    ha_maria::implicit_commit(thd, FALSE);
-#endif
+    ha_maria_implicit_commit(thd, FALSE);
   }
 
   /* Free tables. Set stage 'closing tables' */
@@ -7920,8 +7916,8 @@ void mysql_parse(THD *thd, char *rawbuf, uint length,
     sp_cache_enforce_limit(thd->sp_package_spec_cache, stored_program_cache_size);
     sp_cache_enforce_limit(thd->sp_package_body_cache, stored_program_cache_size);
     thd->end_statement();
+    thd->Item_change_list::rollback_item_tree_changes();
     thd->cleanup_after_query();
-    DBUG_ASSERT(thd->Item_change_list::is_empty());
   }
   else
   {
@@ -8733,6 +8729,11 @@ bool st_select_lex::add_window_def(THD *thd,
                                                       win_frame);
   group_list= thd->lex->save_group_list;
   order_list= thd->lex->save_order_list;
+  if (parsing_place != SELECT_LIST)
+  {
+    fields_in_window_functions+= win_part_list_ptr->elements +
+                                 win_order_list_ptr->elements;
+  }
   return (win_def == NULL || window_specs.push_back(win_def));
 }
 
@@ -8754,6 +8755,11 @@ bool st_select_lex::add_window_spec(THD *thd,
                                                          win_frame);
   group_list= thd->lex->save_group_list;
   order_list= thd->lex->save_order_list;
+  if (parsing_place != SELECT_LIST)
+  {
+    fields_in_window_functions+= win_part_list_ptr->elements +
+                                 win_order_list_ptr->elements;
+  }
   thd->lex->win_spec= win_spec;
   return (win_spec == NULL || window_specs.push_back(win_spec));
 }
@@ -8985,6 +8991,8 @@ void add_join_natural(TABLE_LIST *a, TABLE_LIST *b, List<String> *using_fields,
                       SELECT_LEX *lex)
 {
   b->natural_join= a;
+  a->part_of_natural_join= TRUE;
+  b->part_of_natural_join= TRUE;
   lex->prev_join_using= using_fields;
 }
 
@@ -9014,7 +9022,6 @@ my_bool find_thread_callback(THD *thd, find_thread_callback_arg *arg)
   if (thd->get_command() != COM_DAEMON &&
       arg->id == (arg->query_id ? thd->query_id : (longlong) thd->thread_id))
   {
-    if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
     mysql_mutex_lock(&thd->LOCK_thd_kill);    // Lock from delete
     arg->thd= thd;
     return 1;
@@ -9030,6 +9037,26 @@ THD *find_thread_by_id(longlong id, bool query_id)
   return arg.thd;
 }
 
+#ifdef WITH_WSREP
+my_bool find_thread_with_thd_data_lock_callback(THD *thd, find_thread_callback_arg *arg)
+{
+  if (thd->get_command() != COM_DAEMON &&
+      arg->id == (arg->query_id ? thd->query_id : (longlong) thd->thread_id))
+  {
+    if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
+    mysql_mutex_lock(&thd->LOCK_thd_kill);    // Lock from delete
+    arg->thd= thd;
+    return 1;
+  }
+  return 0;
+}
+THD *find_thread_by_id_with_thd_data_lock(longlong id, bool query_id)
+{
+  find_thread_callback_arg arg(id, query_id);
+  server_threads.iterate(find_thread_with_thd_data_lock_callback, &arg);
+  return arg.thd;
+}
+#endif
 
 /**
   kill one thread.
@@ -9047,8 +9074,11 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
   uint error= (type == KILL_TYPE_QUERY ? ER_NO_SUCH_QUERY : ER_NO_SUCH_THREAD);
   DBUG_ENTER("kill_one_thread");
   DBUG_PRINT("enter", ("id: %lld  signal: %u", id, (uint) kill_signal));
-  WSREP_DEBUG("kill_one_thread %llu", thd->thread_id);
+#ifdef WITH_WSREP
+  if (id && (tmp= find_thread_by_id_with_thd_data_lock(id, type == KILL_TYPE_QUERY)))
+#else
   if (id && (tmp= find_thread_by_id(id, type == KILL_TYPE_QUERY)))
+#endif
   {
     /*
       If we're SUPER, we can KILL anything, including system-threads.
@@ -9080,13 +9110,31 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
         thd->security_ctx->user_matches(tmp->security_ctx))
 #endif /* WITH_WSREP */
     {
-      tmp->awake_no_mutex(kill_signal);
-      error=0;
+#ifdef WITH_WSREP
+      DEBUG_SYNC(thd, "before_awake_no_mutex");
+      if (tmp->wsrep_aborter && tmp->wsrep_aborter != thd->thread_id)
+      {
+        /* victim is in hit list already, bail out */
+	WSREP_DEBUG("victim has wsrep aborter: %lu, skipping awake()",
+                    tmp->wsrep_aborter);
+        error= 0;
+      }
+      else
+#endif /* WITH_WSREP */
+      {
+      WSREP_DEBUG("kill_one_thread %llu, victim: %llu wsrep_aborter %llu by signal %d",
+                  thd->thread_id, id, tmp->wsrep_aborter, kill_signal);
+        tmp->awake_no_mutex(kill_signal);
+        WSREP_DEBUG("victim: %llu taken care of", id);
+        error= 0;
+      }
     }
     else
       error= (type == KILL_TYPE_QUERY ? ER_KILL_QUERY_DENIED_ERROR :
                                         ER_KILL_DENIED_ERROR);
+#ifdef WITH_WSREP
     if (WSREP(tmp)) mysql_mutex_unlock(&tmp->LOCK_thd_data);
+#endif
     mysql_mutex_unlock(&tmp->LOCK_thd_kill);
   }
   DBUG_PRINT("exit", ("%d", error));

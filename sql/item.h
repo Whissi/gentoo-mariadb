@@ -164,7 +164,7 @@ void dummy_error_processor(THD *thd, void *data);
 void view_error_processor(THD *thd, void *data);
 
 /*
-  Instances of Name_resolution_context store the information necesary for
+  Instances of Name_resolution_context store the information necessary for
   name resolution of Items and other context analysis of a query made in
   fix_fields().
 
@@ -344,7 +344,7 @@ public:
   Monotonicity is defined only for Item* trees that represent table
   partitioning expressions (i.e. have no subselects/user vars/PS parameters
   etc etc). An Item* tree is assumed to have the same monotonicity properties
-  as its correspoinding function F:
+  as its corresponding function F:
 
   [signed] longlong F(field1, field2, ...) {
     put values of field_i into table record buffer;
@@ -756,6 +756,7 @@ public:
              CONST_ITEM,
              NULL_ITEM,     // Item_null or Item_param bound to NULL
              COPY_STR_ITEM, FIELD_AVG_ITEM, DEFAULT_VALUE_ITEM,
+             CONTEXTUALLY_TYPED_VALUE_ITEM,
              PROC_ITEM,COND_ITEM, REF_ITEM, FIELD_STD_ITEM,
              FIELD_VARIANCE_ITEM, INSERT_VALUE_ITEM,
              SUBSELECT_ITEM, ROW_ITEM, CACHE_ITEM, TYPE_HOLDER,
@@ -831,6 +832,7 @@ protected:
                                             const Tmp_field_param *param,
                                             bool is_explicit_null);
 
+  void raise_error_not_evaluable();
   void push_note_converted_to_negative_complement(THD *thd);
   void push_note_converted_to_positive_complement(THD *thd);
 
@@ -1129,7 +1131,7 @@ public:
   /*
     real_type() is the type of base item.  This is same as type() for
     most items, except Item_ref() and Item_cache_wrapper() where it
-    shows the type for the underlaying item.
+    shows the type for the underlying item.
   */
   virtual enum Type real_type() const { return type(); }
   
@@ -1275,7 +1277,7 @@ public:
       The caller can modify the returned String, if it's not marked
       "const" (with the String::mark_as_const() method). That means that
       if the item returns its own internal buffer (e.g. tmp_value), it
-      *must* be marked "const" [1]. So normally it's preferrable to
+      *must* be marked "const" [1]. So normally it's preferable to
       return the result value in the String, that was passed as an
       argument. But, for example, SUBSTR() returns a String that simply
       points into the buffer of SUBSTR()'s args[0]->val_str(). Such a
@@ -1576,7 +1578,14 @@ public:
     a constant expression. Used in the optimizer to propagate basic constants.
   */
   virtual bool basic_const_item() const { return 0; }
-  /*
+  /**
+    Determines if the expression is allowed as
+    a virtual column assignment source:
+      INSERT INTO t1 (vcol) VALUES (10)    -> error
+      INSERT INTO t1 (vcol) VALUES (NULL)  -> ok
+  */
+  virtual bool vcol_assignment_allowed_value() const { return false; }
+  /**
     Test if "this" is an ORDER position (rather than an expression).
     Notes:
     - can be called before fix_fields().
@@ -1584,8 +1593,27 @@ public:
       positions. (And they can't be used before fix_fields is called for them).
   */
   virtual bool is_order_clause_position() const { return false; }
+  /*
+    Determines if the Item is an evaluable expression, that is
+    it can return a value, so we can call methods val_xxx(), get_date(), etc.
+    Most items are evaluable expressions.
+    Examples of non-evaluable expressions:
+    - Item_contextually_typed_value_specification (handling DEFAULT and IGNORE)
+    - Item_type_param bound to DEFAULT and IGNORE
+    We cannot call the mentioned methods for these Items,
+    their method implementations typically have DBUG_ASSERT(0).
+  */
+  virtual bool is_evaluable_expression() const { return true; }
+  bool check_is_evaluable_expression_or_error()
+  {
+    if (is_evaluable_expression())
+      return false; // Ok
+    raise_error_not_evaluable();
+    return true;    // Error
+  }
   /* cloning of constant items (0 if it is not const) */
   virtual Item *clone_item(THD *thd) { return 0; }
+  /* deep copy item */
   virtual Item* build_clone(THD *thd) { return get_copy(thd); }
   virtual cond_result eq_cmp_result() const { return COND_OK; }
   inline uint float_length(uint decimals_par) const
@@ -1727,7 +1755,7 @@ public:
      @param cond_ptr[OUT] Store a replacement item here if the condition
                           can be simplified, e.g.:
                             WHERE part1 OR part2 OR part3
-                          with one of the partN evalutating to SEL_TREE::ALWAYS.
+                          with one of the partN evaluating to SEL_TREE::ALWAYS.
    */
    virtual SEL_TREE *get_mm_tree(RANGE_OPT_PARAM *param, Item **cond_ptr);
   /*
@@ -2031,6 +2059,10 @@ public:
   virtual bool check_index_dependence(void *arg) { return 0; }
   /*============== End of Item processor list ======================*/
 
+  /*
+    Does not guarantee deep copy (depends on copy ctor).
+    See build_clone() for deep copy.
+  */
   virtual Item *get_copy(THD *thd)=0;
 
   bool cache_const_expr_analyzer(uchar **arg);
@@ -2260,8 +2292,9 @@ public:
   virtual bool is_outer_field() const { DBUG_ASSERT(is_fixed()); return FALSE; }
 
   /**
-    Checks if this item or any of its decendents contains a subquery. This is a
-    replacement of the former Item::has_subquery() and Item::with_subselect.
+    Checks if this item or any of its descendents contains a subquery.
+    This is a replacement of the former Item::has_subquery() and
+    Item::with_subselect.
   */
   virtual bool with_subquery() const { DBUG_ASSERT(is_fixed()); return false; }
 
@@ -3586,6 +3619,7 @@ public:
     collation.set(cs, DERIVATION_IGNORABLE, MY_REPERTOIRE_ASCII);
   }
   enum Type type() const { return NULL_ITEM; }
+  bool vcol_assignment_allowed_value() const { return true; }
   double val_real();
   longlong val_int();
   String *val_str(String *str);
@@ -3621,9 +3655,11 @@ public:
   Field *result_field;
   Item_null_result(THD *thd): Item_null(thd), result_field(0) {}
   bool is_result_field() { return result_field != 0; }
-  enum_field_types field_type() const
+  const Type_handler *type_handler() const
   {
-    return result_field->type();
+    if (result_field)
+      return result_field->type_handler();
+    return &type_handler_null;
   }
   Field *create_tmp_field_ex(TABLE *table, Tmp_field_src *src,
                              const Tmp_field_param *param)
@@ -3821,6 +3857,7 @@ class Item_param :public Item_basic_value,
 
   const String *value_query_val_str(THD *thd, String* str) const;
   Item *value_clone_item(THD *thd);
+  bool is_evaluable_expression() const;
   bool can_return_value() const;
 
 public:
@@ -3831,6 +3868,21 @@ public:
 
   const Type_handler *type_handler() const
   { return Type_handler_hybrid_field_type::type_handler(); }
+
+  bool vcol_assignment_allowed_value() const
+  {
+    switch (state) {
+    case NULL_VALUE:
+    case DEFAULT_VALUE:
+    case IGNORE_VALUE:
+      return true;
+    case NO_VALUE:
+    case SHORT_DATA_VALUE:
+    case LONG_DATA_VALUE:
+      break;
+    }
+    return false;
+  }
 
   Field::geometry_type get_geometry_type() const
   { return Type_geometry_attributes::get_geometry_type(); };
@@ -6004,7 +6056,7 @@ public:
    
     This is the method that updates the cached value.
     It must be explicitly called by the user of this class to store the value 
-    of the orginal item in the cache.
+    of the original item in the cache.
   */  
   virtual void copy() = 0;
 
@@ -6255,18 +6307,10 @@ class Item_default_value : public Item_field
 public:
   Item *arg;
   Field *cached_field;
-  Item_default_value(THD *thd, Name_resolution_context *context_arg)
-    :Item_field(thd, context_arg, (const char *)NULL, (const char *)NULL,
-                &null_clex_str),
-     arg(NULL), cached_field(NULL) {}
   Item_default_value(THD *thd, Name_resolution_context *context_arg, Item *a)
     :Item_field(thd, context_arg, (const char *)NULL, (const char *)NULL,
                 &null_clex_str),
      arg(a), cached_field(NULL) {}
-  Item_default_value(THD *thd, Name_resolution_context *context_arg, Field *a)
-    :Item_field(thd, context_arg, (const char *)NULL, (const char *)NULL,
-                &null_clex_str),
-     arg(NULL), cached_field(NULL) {}
   enum Type type() const { return DEFAULT_VALUE_ITEM; }
   bool eq(const Item *item, bool binary_cmp) const;
   bool fix_fields(THD *, Item **);
@@ -6277,12 +6321,13 @@ public:
   longlong val_int();
   my_decimal *val_decimal(my_decimal *decimal_value);
   bool get_date(THD *thd, MYSQL_TIME *ltime,date_mode_t fuzzydate);
+  bool val_native(THD *thd, Native *to);
   bool send(Protocol *protocol, st_value *buffer);
   int save_in_field(Field *field_arg, bool no_conversions);
   bool save_in_param(THD *thd, Item_param *param)
   {
     // It should not be possible to have "EXECUTE .. USING DEFAULT(a)"
-    DBUG_ASSERT(arg == NULL);
+    DBUG_ASSERT(0);
     param->set_default();
     return false;
   }
@@ -6307,34 +6352,126 @@ public:
   Item *transform(THD *thd, Item_transformer transformer, uchar *args);
 };
 
+
+class Item_contextually_typed_value_specification: public Item
+{
+public:
+  Item_contextually_typed_value_specification(THD *thd) :Item(thd)
+  { }
+  enum Type type() const { return CONTEXTUALLY_TYPED_VALUE_ITEM; }
+  bool vcol_assignment_allowed_value() const { return true; }
+  bool eq(const Item *item, bool binary_cmp) const
+  {
+    return false;
+  }
+  bool is_evaluable_expression() const { return false; }
+  Field *create_tmp_field_ex(TABLE *table, Tmp_field_src *src,
+                             const Tmp_field_param *param)
+  {
+    DBUG_ASSERT(0);
+    return NULL;
+  }
+  String *val_str(String *str)
+  {
+    DBUG_ASSERT(0); // never should be called
+    null_value= true;
+    return 0;
+  }
+  double val_real()
+  {
+    DBUG_ASSERT(0); // never should be called
+    null_value= true;
+    return 0.0;
+  }
+  longlong val_int()
+  {
+    DBUG_ASSERT(0); // never should be called
+    null_value= true;
+    return 0;
+  }
+  my_decimal *val_decimal(my_decimal *decimal_value)
+  {
+    DBUG_ASSERT(0); // never should be called
+    null_value= true;
+    return 0;
+  }
+  bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate)
+  {
+    DBUG_ASSERT(0); // never should be called
+    return null_value= true;
+  }
+  bool send(Protocol *protocol, st_value *buffer)
+  {
+    DBUG_ASSERT(0);
+    return true;
+  }
+  const Type_handler *type_handler() const
+  {
+    DBUG_ASSERT(0);
+    return &type_handler_null;
+  }
+};
+
+
+/*
+  <default specification> ::= DEFAULT
+*/
+class Item_default_specification:
+        public Item_contextually_typed_value_specification
+{
+public:
+  Item_default_specification(THD *thd)
+   :Item_contextually_typed_value_specification(thd)
+  { }
+  void print(String *str, enum_query_type query_type)
+  {
+    str->append(STRING_WITH_LEN("default"));
+  }
+  int save_in_field(Field *field_arg, bool no_conversions)
+  {
+    return field_arg->save_in_field_default_value(false);
+  }
+  bool save_in_param(THD *thd, Item_param *param)
+  {
+    param->set_default();
+    return false;
+  }
+  Item *get_copy(THD *thd)
+  { return get_item_copy<Item_default_specification>(thd, this); }
+};
+
+
 /**
   This class is used as bulk parameter INGNORE representation.
 
   It just do nothing when assigned to a field
 
+  This is a non-standard MariaDB extension.
 */
 
-class Item_ignore_value : public Item_default_value
+class Item_ignore_specification:
+        public Item_contextually_typed_value_specification
 {
 public:
-  Item_ignore_value(THD *thd, Name_resolution_context *context_arg)
-    :Item_default_value(thd, context_arg)
-  {};
-
-  void print(String *str, enum_query_type query_type);
-  int save_in_field(Field *field_arg, bool no_conversions);
+  Item_ignore_specification(THD *thd)
+   :Item_contextually_typed_value_specification(thd)
+  { }
+  void print(String *str, enum_query_type query_type)
+  {
+    str->append(STRING_WITH_LEN("ignore"));
+  }
+  int save_in_field(Field *field_arg, bool no_conversions)
+  {
+    return field_arg->save_in_field_ignore_value(false);
+  }
   bool save_in_param(THD *thd, Item_param *param)
   {
     param->set_ignore();
     return false;
   }
 
-  String *val_str(String *str);
-  double val_real();
-  longlong val_int();
-  my_decimal *val_decimal(my_decimal *decimal_value);
-  bool get_date(THD *thd, MYSQL_TIME *ltime,date_mode_t fuzzydate);
-  bool send(Protocol *protocol, st_value *buffer);
+  Item *get_copy(THD *thd)
+  { return get_item_copy<Item_ignore_specification>(thd, this); }
 };
 
 
@@ -6682,6 +6819,13 @@ public:
   bool cache_value();
   bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate);
   int save_in_field(Field *field, bool no_conversions);
+  bool setup(THD *thd, Item *item)
+  {
+    if (Item_cache_int::setup(thd, item))
+      return true;
+    set_if_smaller(decimals, TIME_SECOND_PART_DIGITS);
+    return false;
+  }
   void store_packed(longlong val_arg, Item *example);
   /*
     Having a clone_item method tells optimizer that this object
@@ -7082,6 +7226,23 @@ public:
 
   enum Type type() const { return TYPE_HOLDER; }
   TYPELIB *get_typelib() const { return enum_set_typelib; }
+  /*
+    When handling a query like this:
+      VALUES ('') UNION VALUES( _utf16 0x0020 COLLATE utf16_bin);
+    Item_type_holder can be passed to
+      Type_handler_xxx::Item_hybrid_func_fix_attributes()
+    We don't want the latter to perform character set conversion of a
+    Item_type_holder by calling its val_str(), which calls DBUG_ASSERT(0).
+    Let's override const_item() and is_expensive() to avoid this.
+    Note, Item_hybrid_func_fix_attributes() could probably
+    have a new argument to distinguish what we need:
+    - (a) aggregate data type attributes only
+    - (b) install converters after attribute aggregation
+    So st_select_lex_unit::join_union_type_attributes() could
+    ask it to do (a) only, without (b).
+  */
+  bool const_item() const { return false; }
+  bool is_expensive() { return true; }
   double val_real();
   longlong val_int();
   my_decimal *val_decimal(my_decimal *);
