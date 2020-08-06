@@ -408,14 +408,26 @@ trx_free(trx_t*& trx)
 	ut_ad(trx->will_lock == 0);
 
 	trx_pools->mem_free(trx);
+#ifdef __SANITIZE_ADDRESS__
 	/* Unpoison the memory for innodb_monitor_set_option;
 	it is operating also on the freed transaction objects. */
 	MEM_UNDEFINED(&trx->mutex, sizeof trx->mutex);
 	MEM_UNDEFINED(&trx->undo_mutex, sizeof trx->undo_mutex);
-	/* Declare the contents as initialized for Valgrind;
-	we checked that it was initialized in trx_pools->mem_free(trx). */
-	UNIV_MEM_VALID(&trx->mutex, sizeof trx->mutex);
-	UNIV_MEM_VALID(&trx->undo_mutex, sizeof trx->undo_mutex);
+	/* For innobase_kill_connection() */
+	MEM_UNDEFINED(&trx->state, sizeof trx->state);
+	MEM_UNDEFINED(&trx->mysql_thd, sizeof trx->mysql_thd);
+#endif
+#ifdef HAVE_valgrind_or_MSAN
+	/* Unpoison the memory for innodb_monitor_set_option;
+	it is operating also on the freed transaction objects.
+	We checked that these were initialized in
+	trx_pools->mem_free(trx). */
+	MEM_MAKE_DEFINED(&trx->mutex, sizeof trx->mutex);
+	MEM_MAKE_DEFINED(&trx->undo_mutex, sizeof trx->undo_mutex);
+	/* For innobase_kill_connection() */
+	MEM_MAKE_DEFINED(&trx->state, sizeof trx->state);
+	MEM_MAKE_DEFINED(&trx->mysql_thd, sizeof trx->mysql_thd);
+#endif
 
 	trx = NULL;
 }
@@ -466,9 +478,8 @@ trx_validate_state_before_free(trx_t* trx)
 	ut_ad(!trx->mysql_n_tables_locked);
 	ut_ad(!trx->internal);
 
-	if (trx->declared_to_be_inside_innodb) {
-
-		ib::error() << "Freeing a trx (" << trx << ", "
+	if (UNIV_UNLIKELY(trx->declared_to_be_inside_innodb)) {
+		ib::error() << "Freeing a trx ("
 			<< trx_get_id_for_print(trx) << ") which is declared"
 			" to be processing inside InnoDB";
 
@@ -1793,12 +1804,6 @@ trx_commit_in_memory(
 		}
 
 		trx->commit_lsn = lsn;
-
-		/* Tell server some activity has happened, since the trx
-		does changes something. Background utility threads like
-		master thread, purge thread or page_cleaner thread might
-		have some work to do. */
-		srv_active_wake_master_thread();
 	}
 
 	ut_ad(!trx->rsegs.m_noredo.undo);

@@ -124,9 +124,6 @@ trx_rollback_to_savepoint_low(
 
 	mem_heap_free(heap);
 
-	/* There might be work for utility threads.*/
-	srv_active_wake_master_thread();
-
 	MONITOR_DEC(MONITOR_TRX_ACTIVE);
 }
 
@@ -552,19 +549,6 @@ trx_release_savepoint_for_mysql(
 }
 
 /*******************************************************************//**
-Determines if this transaction is rolling back an incomplete transaction
-in crash recovery.
-@return TRUE if trx is an incomplete transaction that is being rolled
-back in crash recovery */
-ibool
-trx_is_recv(
-/*========*/
-	const trx_t*	trx)	/*!< in: transaction */
-{
-	return(trx == trx_roll_crash_recv_trx);
-}
-
-/*******************************************************************//**
 Returns a transaction savepoint taken at this point in time.
 @return savepoint */
 trx_savept_t
@@ -627,7 +611,7 @@ trx_rollback_active(
 
 	if (trx->error_state != DB_SUCCESS) {
 		ut_ad(trx->error_state == DB_INTERRUPTED);
-		ut_ad(!srv_is_being_started);
+		ut_ad(srv_shutdown_state != SRV_SHUTDOWN_NONE);
 		ut_ad(!srv_undo_sources);
 		ut_ad(srv_fast_shutdown);
 		ut_ad(!dictionary_locked);
@@ -717,7 +701,7 @@ func_exit:
 		trx_free_resurrected(trx);
 		return(TRUE);
 	case TRX_STATE_ACTIVE:
-		if (!srv_is_being_started
+		if (srv_shutdown_state != SRV_SHUTDOWN_NONE
 		    && !srv_undo_sources && srv_fast_shutdown) {
 fake_prepared:
 			trx->state = TRX_STATE_PREPARED;
@@ -763,7 +747,7 @@ trx_roll_must_shutdown()
 	ut_ad(trx_state_eq(trx, TRX_STATE_ACTIVE));
 
 	if (trx_get_dict_operation(trx) == TRX_DICT_OP_NONE
-	    && !srv_is_being_started
+	    && srv_shutdown_state != SRV_SHUTDOWN_NONE
 	    && !srv_undo_sources && srv_fast_shutdown) {
 		return true;
 	}

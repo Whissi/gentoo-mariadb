@@ -1867,7 +1867,9 @@ row_upd_changes_ord_field_binary_func(
 			/* Silence a compiler warning without
 			silencing a Valgrind error. */
 			dfield_len = 0;
-			UNIV_MEM_INVALID(&dfield_len, sizeof dfield_len);
+#ifdef HAVE_valgrind_or_MSAN
+			MEM_UNDEFINED(&dfield_len, sizeof dfield_len);
+#endif /* HAVE_valgrind_or_MSAN */
 			/* See if the column is stored externally. */
 			buf = row_ext_lookup(ext, col_no, &dfield_len);
 
@@ -1882,7 +1884,8 @@ row_upd_changes_ord_field_binary_func(
 					when the server had crashed before
 					storing the field. */
 					ut_ad(thr->graph->trx->is_recovered);
-					ut_ad(trx_is_recv(thr->graph->trx));
+					ut_ad(thr->graph->trx
+					      == trx_roll_crash_recv_trx);
 					return(TRUE);
 				}
 
@@ -2471,7 +2474,7 @@ row_upd_sec_index_entry(
 					err = DB_SUCCESS;
 					break;
 				case DB_LOCK_WAIT:
-					if (wsrep_debug) {
+					if (UNIV_UNLIKELY(wsrep_debug)) {
 						ib::warn() << "WSREP: sec index FK lock wait"
 							   << " index " << index->name
 							   << " table " << index->table->name
@@ -2479,7 +2482,7 @@ row_upd_sec_index_entry(
 					}
 					break;
 				case DB_DEADLOCK:
-					if (wsrep_debug) {
+					if (UNIV_UNLIKELY(wsrep_debug)) {
 						ib::warn() << "WSREP: sec index FK check fail for deadlock"
 							   << " index " << index->name
 							   << " table " << index->table->name
@@ -2487,7 +2490,7 @@ row_upd_sec_index_entry(
 					}
 					break;
 				default:
-					ib::error() << "WSREP: referenced FK check fail: " << ut_strerr(err)
+					ib::error() << "WSREP: referenced FK check fail: " << err
 						    << " index " << index->name
 						    << " table " << index->table->name
 						    << " query " << wsrep_thd_query(trx->mysql_thd);
@@ -2786,14 +2789,14 @@ check_fk:
 				err = DB_SUCCESS;
 				break;
 			case DB_DEADLOCK:
-				if (wsrep_debug) {
+				if (UNIV_UNLIKELY(wsrep_debug)) {
 					ib::warn() << "WSREP: sec index FK check fail for deadlock"
 						   << " index " << index->name
 						   << " table " << index->table->name;
 				}
 				goto err_exit;
 			default:
-				ib::error() << "WSREP: referenced FK check fail: " << ut_strerr(err)
+				ib::error() << "WSREP: referenced FK check fail: " << err
 					    << " index " << index->name
 					    << " table " << index->table->name;
 				goto err_exit;
@@ -3012,14 +3015,14 @@ row_upd_del_mark_clust_rec(
 			err = DB_SUCCESS;
 			break;
 		case DB_DEADLOCK:
-			if (wsrep_debug) {
+			if (UNIV_UNLIKELY(wsrep_debug)) {
 				ib::warn() << "WSREP: sec index FK check fail for deadlock"
 					   << " index " << index->name
 					   << " table " << index->table->name;
 			}
 			break;
 		default:
-			ib::error() << "WSREP: referenced FK check fail: " << ut_strerr(err)
+			ib::error() << "WSREP: referenced FK check fail: " << err
 				    << " index " << index->name
 				    << " table " << index->table->name;
 

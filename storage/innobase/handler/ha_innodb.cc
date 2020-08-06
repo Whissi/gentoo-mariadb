@@ -446,14 +446,6 @@ static TYPELIB innodb_lock_schedule_algorithm_typelib = {
 	NULL
 };
 
-/* The following counter is used to convey information to InnoDB
-about server activity: in case of normal DML ops it is not
-sensible to call srv_active_wake_master_thread after each
-operation, we only do it every INNOBASE_WAKE_INTERVAL'th step. */
-
-#define INNOBASE_WAKE_INTERVAL	32
-static ulong	innobase_active_counter	= 0;
-
 /** Allowed values of innodb_change_buffering */
 static const char* innobase_change_buffering_values[IBUF_USE_COUNT] = {
 	"none",		/* IBUF_USE_NONE */
@@ -626,7 +618,6 @@ static PSI_mutex_info all_innodb_mutexes[] = {
 	PSI_KEY(rtr_active_mutex),
 	PSI_KEY(rtr_match_mutex),
 	PSI_KEY(rtr_path_mutex),
-	PSI_KEY(rtr_ssn_mutex),
 	PSI_KEY(trx_sys_mutex),
 	PSI_KEY(zip_pad_mutex)
 };
@@ -1895,23 +1886,6 @@ thd_to_trx_id(
 #endif /* WITH_WSREP */
 
 /********************************************************************//**
-Increments innobase_active_counter and every INNOBASE_WAKE_INTERVALth
-time calls srv_active_wake_master_thread. This function should be used
-when a single database operation may introduce a small need for
-server utility activity, like checkpointing. */
-inline
-void
-innobase_active_small(void)
-/*=======================*/
-{
-	innobase_active_counter++;
-
-	if ((innobase_active_counter % INNOBASE_WAKE_INTERVAL) == 0) {
-		srv_active_wake_master_thread();
-	}
-}
-
-/********************************************************************//**
 Converts an InnoDB error code to a MySQL error code and also tells to MySQL
 about a possible transaction rollback inside InnoDB caused by a lock wait
 timeout or a deadlock.
@@ -2300,17 +2274,6 @@ innobase_casedn_str(
 	my_casedn_str(system_charset_info, a);
 }
 
-/**********************************************************************//**
-Determines the connection character set.
-@return connection character set */
-CHARSET_INFO*
-innobase_get_charset(
-/*=================*/
-	THD*	mysql_thd)	/*!< in: MySQL thread handle */
-{
-	return(thd_charset(mysql_thd));
-}
-
 /** Determines the current SQL statement.
 Thread unsafe, can only be called from the thread owning the THD.
 @param[in]	thd	MySQL thread handle
@@ -2328,22 +2291,6 @@ innobase_get_stmt_unsafe(
 
 	*length = 0;
 	return NULL;
-}
-
-/** Determines the current SQL statement.
-Thread safe, can be called from any thread as the string is copied
-into the provided buffer.
-@param[in]	thd	MySQL thread handle
-@param[out]	buf	Buffer containing SQL statement
-@param[in]	buflen	Length of provided buffer
-@return			Length of the SQL statement */
-size_t
-innobase_get_stmt_safe(
-	THD*	thd,
-	char*	buf,
-	size_t	buflen)
-{
-	return thd_query_safe(thd, buf, buflen);
 }
 
 /**********************************************************************//**
@@ -3496,7 +3443,7 @@ ha_innobase::reset_template(void)
 	/* Force table to be freed in close_thread_table(). */
 	DBUG_EXECUTE_IF("free_table_in_fts_query",
 		if (m_prebuilt->in_fts_query) {
-			table->m_needs_reopen = true;
+                  table->mark_table_for_reopen();
 		}
 	);
 
@@ -3809,7 +3756,7 @@ innobase_init(
 	pages, even for larger pages */
 	if (UNIV_PAGE_SIZE > UNIV_PAGE_SIZE_DEF
 	    && innobase_buffer_pool_size < (24 * 1024 * 1024)) {
-		ib::info() << "innodb_page_size="
+		ib::error() << "innodb_page_size="
 			<< UNIV_PAGE_SIZE << " requires "
 			<< "innodb_buffer_pool_size > 24M current "
 			<< innobase_buffer_pool_size;
@@ -4470,16 +4417,7 @@ innobase_commit_low(
 	const bool is_wsrep = trx->is_wsrep();
 	THD* thd = trx->mysql_thd;
 	if (is_wsrep) {
-#ifdef WSREP_PROC_INFO
-		char info[64];
-		info[sizeof(info) - 1] = '\0';
-		snprintf(info, sizeof(info) - 1,
-			 "innobase_commit_low():trx_commit_for_mysql(%lld)",
-			 (long long) wsrep_thd_trx_seqno(thd));
-		tmp = thd_proc_info(thd, info);
-#else
 		tmp = thd_proc_info(thd, "innobase_commit_low()");
-#endif /* WSREP_PROC_INFO */
 	}
 #endif /* WITH_WSREP */
 	if (trx_is_started(trx)) {
@@ -5229,13 +5167,43 @@ static void innobase_kill_query(handlerton*, THD* thd, enum thd_kill_levels)
 	}
 #endif /* WITH_WSREP */
 
-	if (trx_t* trx = thd_to_trx(thd)) {
-		ut_ad(trx->mysql_thd == thd);
-		/* Cancel a pending lock request if there are any */
-		lock_trx_handle_wait(trx);
-	}
+  if (trx_t* trx= thd_to_trx(thd))
+  {
+    lock_mutex_enter();
+    trx_sys_mutex_enter();
+    trx_mutex_enter(trx);
+    /* It is possible that innobase_close_connection() is concurrently
+    being executed on our victim. In that case, trx->mysql_thd would
+    be reset before invoking trx_free(). Even if the trx object is later
+    reused for another client connection or a background transaction,
+    its trx->mysql_thd will differ from our thd.
 
-	DBUG_VOID_RETURN;
+    If trx never performed any changes, nothing is really protecting
+    the trx_free() call or the changes of trx_t::state when the
+    transaction is being rolled back and trx_commit_low() is being
+    executed.
+
+    The function trx_allocate_for_mysql() acquires
+    trx_sys_t::mutex, but trx_allocate_for_background() will not.
+    Luckily, background transactions cannot be read-only, because
+    for read-only transactions, trx_start_low() will avoid acquiring
+    any of the trx_sys_t::mutex, lock_sys_t::mutex, trx_t::mutex before
+    assigning trx_t::state.
+
+    At this point, trx may have been reallocated for another client
+    connection, or for a background operation. In that case, either
+    trx_t::state or trx_t::mysql_thd should not match our expectations. */
+    bool cancel= trx->mysql_thd == thd && trx->state == TRX_STATE_ACTIVE &&
+      !trx->lock.was_chosen_as_deadlock_victim;
+    trx_sys_mutex_exit();
+    if (!cancel);
+    else if (lock_t *lock= trx->lock.wait_lock)
+      lock_cancel_waiting_and_release(lock);
+    lock_mutex_exit();
+    trx_mutex_exit(trx);
+  }
+
+  DBUG_VOID_RETURN;
 }
 
 
@@ -6653,11 +6621,6 @@ ha_innobase::close()
 
 	MONITOR_INC(MONITOR_TABLE_CLOSE);
 
-	/* Tell InnoDB server that there might be work for
-	utility threads: */
-
-	srv_active_wake_master_thread();
-
 	DBUG_RETURN(0);
 }
 
@@ -7497,7 +7460,9 @@ build_template_field(
 	ut_ad(clust_index->table == index->table);
 
 	templ = prebuilt->mysql_template + prebuilt->n_template++;
-	UNIV_MEM_INVALID(templ, sizeof *templ);
+#ifdef HAVE_valgrind_or_MSAN
+	MEM_UNDEFINED(templ, sizeof *templ);
+#endif /* HAVE_valgrind_or_MSAN */
 	templ->is_virtual = !field->stored_in_db();
 
 	if (!templ->is_virtual) {
@@ -8126,8 +8091,7 @@ ha_innobase::write_row(
 	if (high_level_read_only) {
 		ib_senderrf(ha_thd(), IB_LOG_LEVEL_WARN, ER_READ_ONLY_MODE);
 		DBUG_RETURN(HA_ERR_TABLE_READONLY);
-	} else if (m_prebuilt->trx != trx) {
-
+	} else if (UNIV_UNLIKELY(m_prebuilt->trx != trx)) {
 		ib::error() << "The transaction object for the table handle is"
 			" at " << static_cast<const void*>(m_prebuilt->trx)
 			<< ", but for the current thread it is at "
@@ -8371,8 +8335,6 @@ report_error:
 	}
 
 func_exit:
-	innobase_active_small();
-
 	DBUG_RETURN(error_result);
 }
 
@@ -8618,7 +8580,9 @@ calc_row_difference(
 			/* The field has changed */
 
 			ufield = uvect->fields + n_changed;
-			UNIV_MEM_INVALID(ufield, sizeof *ufield);
+#ifdef HAVE_valgrind_or_MSAN
+			MEM_UNDEFINED(ufield, sizeof *ufield);
+#endif /* HAVE_valgrind_or_MSAN */
 
 			/* Let us use a dummy dfield to make the conversion
 			from the MySQL column format to the InnoDB format */
@@ -9041,11 +9005,6 @@ func_exit:
 			error, m_prebuilt->table->flags, m_user_thd);
 	}
 
-	/* Tell InnoDB server that there might be work for
-	utility threads: */
-
-	innobase_active_small();
-
 #ifdef WITH_WSREP
 	if (error == DB_SUCCESS && trx->is_wsrep() &&
 	    wsrep_thd_exec_mode(m_user_thd) == LOCAL_STATE &&
@@ -9100,11 +9059,6 @@ ha_innobase::delete_row(
 	error = row_update_for_mysql(m_prebuilt);
 
 	innobase_srv_conc_exit_innodb(m_prebuilt);
-
-	/* Tell the InnoDB server that there might be work for
-	utility threads: */
-
-	innobase_active_small();
 
 #ifdef WITH_WSREP
 	if (error == DB_SUCCESS && trx->is_wsrep()
@@ -9987,7 +9941,7 @@ ha_innobase::ft_init_ext(
 	const CHARSET_INFO*	char_set = key->charset();
 	const char*		query = key->ptr();
 
-	if (fts_enable_diag_print) {
+	if (UNIV_UNLIKELY(fts_enable_diag_print)) {
 		{
 			ib::info	out;
 			out << "keynr=" << keynr << ", '";
@@ -12993,7 +12947,6 @@ create_table_info_t::create_table_update_dict()
 	if (m_flags2 & DICT_TF2_FTS) {
 		if (!innobase_fts_load_stopword(innobase_table, NULL, m_thd)) {
 			dict_table_close(innobase_table, FALSE, FALSE);
-			srv_active_wake_master_thread();
 			trx_free_for_mysql(m_trx);
 			DBUG_RETURN(-1);
 		}
@@ -13138,11 +13091,6 @@ ha_innobase::create(
 	ut_ad(!srv_read_only_mode);
 
 	error = info.create_table_update_dict();
-
-	/* Tell the InnoDB server that there might be work for
-	utility threads: */
-
-	srv_active_wake_master_thread();
 
 	DBUG_RETURN(error);
 }
@@ -18132,7 +18080,7 @@ innodb_adaptive_hash_index_update(
 	if (*(my_bool*) save) {
 		btr_search_enable();
 	} else {
-		btr_search_disable(true);
+		btr_search_disable();
 	}
 	mysql_mutex_lock(&LOCK_global_system_variables);
 }
@@ -19481,11 +19429,14 @@ static
 void
 innodb_status_output_update(THD*,st_mysql_sys_var*,void*var,const void*save)
 {
-	*static_cast<my_bool*>(var) = *static_cast<const my_bool*>(save);
-	mysql_mutex_unlock(&LOCK_global_system_variables);
-	/* Wakeup server monitor thread. */
-	os_event_set(srv_monitor_event);
-	mysql_mutex_lock(&LOCK_global_system_variables);
+  *static_cast<my_bool*>(var)= *static_cast<const my_bool*>(save);
+  if (srv_monitor_event)
+  {
+    mysql_mutex_unlock(&LOCK_global_system_variables);
+    /* Wakeup server monitor thread. */
+    os_event_set(srv_monitor_event);
+    mysql_mutex_lock(&LOCK_global_system_variables);
+  }
 }
 
 /** Update the system variable innodb_encryption_threads.
@@ -19550,33 +19501,6 @@ innodb_log_checksums_update(
 	*static_cast<my_bool*>(var_ptr) = innodb_log_checksums_func_update(
 		thd, *static_cast<const my_bool*>(save));
 }
-
-#ifdef UNIV_DEBUG
-static
-void
-innobase_debug_sync_callback(srv_slot_t *slot, const void *value)
-{
-	const char *value_str = *static_cast<const char* const*>(value);
-	size_t len = strlen(value_str) + 1;
-
-
-	// One allocatoin for list node object and value.
-	void *buf = ut_malloc_nokey(sizeof(srv_slot_t::debug_sync_t) + len);
-	srv_slot_t::debug_sync_t *sync = new(buf) srv_slot_t::debug_sync_t();
-	strcpy(reinterpret_cast<char*>(&sync[1]), value_str);
-
-	rw_lock_x_lock(&slot->debug_sync_lock);
-	UT_LIST_ADD_LAST(slot->debug_sync, sync);
-	rw_lock_x_unlock(&slot->debug_sync_lock);
-}
-static
-void
-innobase_debug_sync_set(THD *thd, st_mysql_sys_var*, void *, const void *value)
-{
-	srv_for_each_thread(SRV_WORKER, innobase_debug_sync_callback, value);
-	srv_for_each_thread(SRV_PURGE, innobase_debug_sync_callback, value);
-}
-#endif
 
 static SHOW_VAR innodb_status_variables_export[]= {
 	{"Innodb", (char*) &show_innodb_vars, SHOW_FUNC},
@@ -20989,7 +20913,7 @@ static MYSQL_SYSVAR_UINT(data_file_size_debug,
   srv_sys_space_size_debug,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "InnoDB system tablespace size to be set in recovery.",
-  NULL, NULL, 0, 0, UINT_MAX32, 0);
+  NULL, NULL, 0, 0, 256U << 20, 0);
 
 static MYSQL_SYSVAR_ULONG(fil_make_page_dirty_debug,
   srv_fil_make_page_dirty_debug, PLUGIN_VAR_OPCMDARG,
@@ -21105,7 +21029,7 @@ static MYSQL_SYSVAR_UINT(encryption_threads, srv_n_fil_crypt_threads,
 			 "scrubbing",
 			 NULL,
 			 innodb_encryption_threads_update,
-			 srv_n_fil_crypt_threads, 0, UINT_MAX32, 0);
+			 0, 0, 255, 0);
 
 static MYSQL_SYSVAR_UINT(encryption_rotate_key_age,
 			 srv_fil_crypt_rotate_key_age,
@@ -21190,16 +21114,6 @@ static MYSQL_SYSVAR_BOOL(debug_force_scrubbing,
 			 0,
 			 "Perform extra scrubbing to increase test exposure",
 			 NULL, NULL, FALSE);
-
-char *innobase_debug_sync;
-static MYSQL_SYSVAR_STR(debug_sync, innobase_debug_sync,
-			PLUGIN_VAR_NOCMDARG,
-			"debug_sync for innodb purge threads. "
-			"Use it to set up sync points for all purge threads "
-			"at once. The commands will be applied sequentially at "
-			"the beginning of purging the next undo record.",
-			NULL,
-			innobase_debug_sync_set, NULL);
 #endif /* UNIV_DEBUG */
 
 static MYSQL_SYSVAR_BOOL(instrument_semaphores, innodb_instrument_semaphores,
@@ -21423,7 +21337,6 @@ static struct st_mysql_sys_var* innobase_system_variables[]= {
   MYSQL_SYSVAR(background_scrub_data_check_interval),
 #ifdef UNIV_DEBUG
   MYSQL_SYSVAR(debug_force_scrubbing),
-  MYSQL_SYSVAR(debug_sync),
 #endif
   MYSQL_SYSVAR(instrument_semaphores),
   MYSQL_SYSVAR(buf_dump_status_frequency),

@@ -1333,7 +1333,8 @@ srv_printf_innodb_monitor(
 	ibuf_print(file);
 
 #ifdef BTR_CUR_HASH_ADAPT
-	for (ulint i = 0; i < btr_ahi_parts; ++i) {
+	btr_search_x_lock_all();
+	for (ulint i = 0; i < btr_ahi_parts && btr_search_enabled; ++i) {
 		const hash_table_t* table = btr_search_sys->hash_tables[i];
 
 		ut_ad(table->magic_n == HASH_TABLE_MAGIC_N);
@@ -1357,6 +1358,7 @@ srv_printf_innodb_monitor(
 			", node heap has " ULINTPF " buffer(s)\n",
 			table->n_cells, heap->base.count - !heap->free_block);
 	}
+	btr_search_x_unlock_all();
 
 	fprintf(file,
 		"%.2f hash searches/s, %.2f non-hash searches/s\n",
@@ -1800,7 +1802,7 @@ loop:
 
 	srv_refresh_innodb_monitor_stats();
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		goto exit_func;
 	}
 
@@ -1912,7 +1914,7 @@ loop:
 
 	os_event_wait_time_low(srv_error_event, 1000000, sig_count);
 
-	if (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state <= SRV_SHUTDOWN_INITIATED) {
 
 		goto loop;
 	}
@@ -1962,7 +1964,7 @@ srv_get_active_thread_type(void)
 
 	srv_sys_mutex_exit();
 
-	if (ret == SRV_NONE && srv_shutdown_state != SRV_SHUTDOWN_NONE
+	if (ret == SRV_NONE && srv_shutdown_state > SRV_SHUTDOWN_INITIATED
 	    && purge_sys != NULL) {
 		/* Check only on shutdown. */
 		switch (trx_purge_state()) {
@@ -1980,33 +1982,6 @@ srv_get_active_thread_type(void)
 	return(ret);
 }
 
-/** Wake up the InnoDB master thread if it was suspended (not sleeping). */
-void
-srv_active_wake_master_thread_low()
-{
-	ut_ad(!srv_read_only_mode);
-	ut_ad(!srv_sys_mutex_own());
-
-	srv_inc_activity_count();
-
-	if (my_atomic_loadlint(&srv_sys.n_threads_active[SRV_MASTER]) == 0) {
-		srv_slot_t*	slot;
-
-		srv_sys_mutex_enter();
-
-		slot = &srv_sys.sys_threads[SRV_MASTER_SLOT];
-
-		/* Only if the master thread has been started. */
-
-		if (slot->in_use) {
-			ut_a(srv_slot_get_type(slot) == SRV_MASTER);
-			os_event_set(slot->event);
-		}
-
-		srv_sys_mutex_exit();
-	}
-}
-
 /** Wake up the purge threads if there is work to do. */
 void
 srv_wake_purge_thread_if_not_active()
@@ -2021,14 +1996,6 @@ srv_wake_purge_thread_if_not_active()
 	}
 }
 
-/** Wake up the master thread if it is suspended or being suspended. */
-void
-srv_wake_master_thread()
-{
-	srv_inc_activity_count();
-	srv_release_threads(SRV_MASTER, 1);
-}
-
 /*******************************************************************//**
 Get current server activity count. We don't hold srv_sys::mutex while
 reading this value as it is only used in heuristics.
@@ -2040,15 +2007,20 @@ srv_get_activity_count(void)
 	return(srv_sys.activity_count);
 }
 
-/*******************************************************************//**
-Check if there has been any activity.
+/** Check if there has been any activity.
+@param[in,out]  activity_count  recent activity count to be returned
+if there is a change
 @return FALSE if no change in activity counter. */
-ibool
-srv_check_activity(
-/*===============*/
-	ulint		old_activity_count)	/*!< in: old activity count */
+bool srv_check_activity(ulint  *activity_count)
 {
-	return(srv_sys.activity_count != old_activity_count);
+  ulint new_activity_count= srv_sys.activity_count;
+  if (new_activity_count != *activity_count)
+  {
+    *activity_count= new_activity_count;
+    return true;
+  }
+
+  return false;
 }
 
 /********************************************************************//**
@@ -2217,7 +2189,7 @@ srv_master_do_active_tasks(void)
 
 	ut_d(srv_master_do_disabled_loop());
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		return;
 	}
 
@@ -2242,7 +2214,7 @@ srv_master_do_active_tasks(void)
 	/* Now see if various tasks that are performed at defined
 	intervals need to be performed. */
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		return;
 	}
 
@@ -2267,7 +2239,7 @@ srv_master_do_active_tasks(void)
 	early and often to avoid those situations. */
 	DBUG_EXECUTE_IF("ib_log_checkpoint_avoid", return;);
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		return;
 	}
 
@@ -2310,7 +2282,7 @@ srv_master_do_idle_tasks(void)
 
 	ut_d(srv_master_do_disabled_loop());
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		return;
 	}
 
@@ -2326,7 +2298,7 @@ srv_master_do_idle_tasks(void)
 	MONITOR_INC_TIME_IN_MICRO_SECS(
 		MONITOR_SRV_IBUF_MERGE_MICROSECOND, counter_time);
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		return;
 	}
 
@@ -2354,7 +2326,7 @@ srv_master_do_idle_tasks(void)
 	early and often to avoid those situations. */
 	DBUG_EXECUTE_IF("ib_log_checkpoint_avoid", return;);
 
-	if (srv_shutdown_state != SRV_SHUTDOWN_NONE) {
+	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
 		return;
 	}
 
@@ -2363,6 +2335,10 @@ srv_master_do_idle_tasks(void)
 	log_checkpoint(true);
 	MONITOR_INC_TIME_IN_MICRO_SECS(MONITOR_SRV_CHECKPOINT_MICROSECOND,
 				       counter_time);
+
+	/* This is a workaround to avoid the InnoDB hang when OS datetime
+	changed backwards.*/
+	os_event_set(buf_flush_event);
 }
 
 /** Perform shutdown tasks.
@@ -2451,52 +2427,30 @@ DECLARE_THREAD(srv_master_thread)(
 	slot = srv_reserve_slot(SRV_MASTER);
 	ut_a(slot == srv_sys.sys_threads);
 
-loop:
-	while (srv_shutdown_state == SRV_SHUTDOWN_NONE) {
-
+	while (srv_shutdown_state <= SRV_SHUTDOWN_INITIATED) {
 		srv_master_sleep();
 
 		MONITOR_INC(MONITOR_MASTER_THREAD_SLEEP);
 
-		if (srv_check_activity(old_activity_count)) {
-			old_activity_count = srv_get_activity_count();
+		if (srv_check_activity(&old_activity_count)) {
 			srv_master_do_active_tasks();
 		} else {
 			srv_master_do_idle_tasks();
 		}
 	}
 
-	switch (srv_shutdown_state) {
-	case SRV_SHUTDOWN_NONE:
-		break;
-	case SRV_SHUTDOWN_FLUSH_PHASE:
-	case SRV_SHUTDOWN_LAST_PHASE:
-		ut_ad(0);
-		/* fall through */
-	case SRV_SHUTDOWN_EXIT_THREADS:
-		/* srv_init_abort() must have been invoked */
-	case SRV_SHUTDOWN_CLEANUP:
-		if (srv_shutdown_state == SRV_SHUTDOWN_CLEANUP
-		    && srv_fast_shutdown < 2) {
-			srv_shutdown(srv_fast_shutdown == 0);
-		}
-		srv_suspend_thread(slot);
-		my_thread_end();
-		os_thread_exit();
+        ut_ad(srv_shutdown_state == SRV_SHUTDOWN_EXIT_THREADS
+              || srv_shutdown_state == SRV_SHUTDOWN_CLEANUP);
+
+	if (srv_shutdown_state == SRV_SHUTDOWN_CLEANUP
+            && srv_fast_shutdown < 2) {
+	        srv_shutdown(srv_fast_shutdown == 0);
 	}
 
-	srv_main_thread_op_info = "suspending";
-
 	srv_suspend_thread(slot);
-
-	/* DO NOT CHANGE THIS STRING. innobase_start_or_create_for_mysql()
-	waits for database activity to die down when converting < 4.1.x
-	databases, and relies on this string being exactly as it is. InnoDB
-	manual also mentions this string in several places. */
-	srv_main_thread_op_info = "waiting for server activity";
-
-	srv_resume_thread(slot);
-	goto loop;
+	my_thread_end();
+	os_thread_exit();
+	OS_THREAD_DUMMY_RETURN;
 }
 
 /** Check if purge should stop.
@@ -2506,8 +2460,7 @@ static
 bool
 srv_purge_should_exit(ulint n_purged)
 {
-	ut_ad(srv_shutdown_state == SRV_SHUTDOWN_NONE
-	      || srv_shutdown_state == SRV_SHUTDOWN_CLEANUP);
+	ut_ad(srv_shutdown_state <= SRV_SHUTDOWN_CLEANUP);
 
 	if (srv_undo_sources) {
 		return(false);
@@ -2516,18 +2469,20 @@ srv_purge_should_exit(ulint n_purged)
 		return(true);
 	}
 	/* Slow shutdown was requested. */
-	if (n_purged) {
-#if defined HAVE_SYSTEMD && !defined EMBEDDED_LIBRARY
+	if (ulint history_size = n_purged ? trx_sys->rseg_history_len : 0) {
 		static time_t progress_time;
 		time_t now = time(NULL);
 		if (now - progress_time >= 15) {
 			progress_time = now;
+#if defined HAVE_SYSTEMD && !defined EMBEDDED_LIBRARY
 			service_manager_extend_timeout(
 				INNODB_EXTEND_TIMEOUT_INTERVAL,
 				"InnoDB: to purge " ULINTPF " transactions",
-				trx_sys->rseg_history_len);
-		}
+				history_size);
 #endif
+			ib::info() << "to purge " << history_size
+				   << " transactions";
+		}
 		/* The previous round still did some work. */
 		return(false);
 	}
@@ -2599,13 +2554,6 @@ DECLARE_THREAD(srv_worker_thread)(
 #endif /* UNIV_DEBUG_THREAD_CREATION */
 
 	slot = srv_reserve_slot(SRV_WORKER);
-
-#ifdef UNIV_DEBUG
-	UT_LIST_INIT(slot->debug_sync,
-		     &srv_slot_t::debug_sync_t::debug_sync_list);
-	rw_lock_create(PFS_NOT_INSTRUMENTED, &slot->debug_sync_lock,
-		       SYNC_NO_ORDER_CHECK);
-#endif
 
 	ut_a(srv_n_purge_threads > 1);
 	ut_a(ulong(my_atomic_loadlint(&srv_sys.n_threads_active[SRV_WORKER]))
@@ -2699,15 +2647,13 @@ srv_do_purge(ulint* n_total_purged
 				++n_use_threads;
 			}
 
-		} else if (srv_check_activity(old_activity_count)
+		} else if (srv_check_activity(&old_activity_count)
 			   && n_use_threads > 1) {
 
 			/* History length same or smaller since last snapshot,
 			use fewer threads. */
 
 			--n_use_threads;
-
-			old_activity_count = srv_get_activity_count();
 		}
 
 		/* Ensure that the purge threads are less than what
@@ -2784,7 +2730,7 @@ srv_purge_coordinator_suspend(
 
 		rw_lock_x_lock(&purge_sys->latch);
 
-		stop = (srv_shutdown_state == SRV_SHUTDOWN_NONE
+		stop = (srv_shutdown_state <= SRV_SHUTDOWN_INITIATED
 			&& purge_sys->state == PURGE_STATE_STOP);
 
 		if (!stop) {
@@ -2854,19 +2800,13 @@ DECLARE_THREAD(srv_purge_coordinator_thread)(
 
 	slot = srv_reserve_slot(SRV_PURGE);
 
-#ifdef UNIV_DEBUG
-	UT_LIST_INIT(slot->debug_sync,
-		     &srv_slot_t::debug_sync_t::debug_sync_list);
-	rw_lock_create(PFS_NOT_INSTRUMENTED, &slot->debug_sync_lock,
-		       SYNC_NO_ORDER_CHECK);
-#endif
 	ulint	rseg_history_len = trx_sys->rseg_history_len;
 
 	do {
 		/* If there are no records to purge or the last
 		purge didn't purge any records then wait for activity. */
 
-		if (srv_shutdown_state == SRV_SHUTDOWN_NONE
+		if (srv_shutdown_state <= SRV_SHUTDOWN_INITIATED
 		    && srv_undo_sources
 		    && (purge_sys->state == PURGE_STATE_STOP
 			|| n_total_purged == 0)) {

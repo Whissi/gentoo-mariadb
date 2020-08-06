@@ -149,7 +149,7 @@ void setup_log_handling()
 
 /**
    purge logs, master and slave sides both, related error code
-   convertor.
+   converter.
    Called from @c purge_error_message(), @c MYSQL_BIN_LOG::reset_logs()
 
    @param  res  an internal to purging routines error code 
@@ -358,7 +358,7 @@ public:
       never zero.
 
       This is done while calling the constructor binlog_cache_mngr.
-      We cannot set informaton in the constructor binlog_cache_data
+      We cannot set information in the constructor binlog_cache_data
       because the space for binlog_cache_mngr is allocated through
       a placement new.
 
@@ -2417,7 +2417,7 @@ static int find_uniq_filename(char *name, ulong next_log_number)
   char                  buff[FN_REFLEN], ext_buf[FN_REFLEN];
   struct st_my_dir     *dir_info;
   struct fileinfo *file_info;
-  ulong                 max_found, next, UNINIT_VAR(number);
+  ulong                 max_found= 0, next= 0, number= 0;
   size_t		buf_length, length;
   char			*start, *end;
   int                   error= 0;
@@ -2443,7 +2443,7 @@ static int find_uniq_filename(char *name, ulong next_log_number)
     if (strncmp(file_info->name, start, length) == 0 &&
 	test_if_number(file_info->name+length, &number,0))
     {
-      set_if_bigger(max_found,(ulong) number);
+      set_if_bigger(max_found, number);
     }
   }
   my_dirend(dir_info);
@@ -2941,7 +2941,7 @@ bool MYSQL_QUERY_LOG::write(THD *thd, time_t current_time,
 
   mysql_mutex_lock(&LOCK_log);
   if (is_open())
-  {						// Safety agains reopen
+  {						// Safety against reopen
     int tmp_errno= 0;
     char buff[80], *end;
     char query_time_buff[22+7], lock_time_buff[22+7];
@@ -3222,7 +3222,7 @@ void MYSQL_BIN_LOG::cleanup()
 
   /*
     Free data for global binlog state.
-    We can't do that automaticly as we need to do this before
+    We can't do that automatically as we need to do this before
     safemalloc is shut down
   */
   if (!is_relay_log)
@@ -3379,6 +3379,8 @@ bool MYSQL_BIN_LOG::open(const char *log_name,
                                  log_type_arg, io_cache_type_arg))
   {
     sql_print_error("MYSQL_BIN_LOG::open failed to generate new file name.");
+    if (!is_relay_log)
+      goto err;
     DBUG_RETURN(1);
   }
 
@@ -3740,7 +3742,7 @@ err:
   sql_print_error("Could not use %s for logging (error %d). \
 Turning logging off for the whole duration of the MySQL server process. \
 To turn it on again: fix the cause, \
-shutdown the MySQL server and restart it.", name, errno);
+shutdown the MySQL server and restart it.", (name) ? name : log_name, errno);
   if (new_xid_list_entry)
     delete new_xid_list_entry;
   if (file >= 0)
@@ -3991,7 +3993,7 @@ err:
 
 
 /**
-  Delete all logs refered to in the index file.
+  Delete all logs referred to in the index file.
 
   The new index file will only contain this file.
 
@@ -5554,7 +5556,7 @@ binlog_cache_mngr *THD::binlog_setup_trx_data()
 
     - Start a statement transaction to allow us to truncate the cache.
 
-    - Save the currrent binlog position so that we can roll back the
+    - Save the current binlog position so that we can roll back the
       statement by truncating the cache.
 
       We only update the saved position if the old one was undefined,
@@ -6752,7 +6754,7 @@ static const char* get_first_binlog(char* buf_arg)
   }
   if (normalize_binlog_name(buf_arg, fname, false))
   {
-    errmsg= "cound not normalize the first file name in the binlog index";
+    errmsg= "could not normalize the first file name in the binlog index";
     goto end;
   }
 end:
@@ -9752,7 +9754,7 @@ TC_LOG_BINLOG::mark_xid_done(ulong binlog_id, bool write_checkpoint)
     than compare all found against each other to find the one pointing to the
     most recent binlog.
 
-    Note also that we need to first release LOCK_xid_list, then aquire
+    Note also that we need to first release LOCK_xid_list, then acquire
     LOCK_log, then re-aquire LOCK_xid_list. If we were to take LOCK_log while
     holding LOCK_xid_list, we might deadlock with other threads that take the
     locks in the opposite order.
@@ -9837,7 +9839,7 @@ TC_LOG_BINLOG::commit_checkpoint_notify(void *cookie)
   necessary stuff.
 
   In the future, this thread could also be used to do log rotation in the
-  background, which could elimiate all stalls around binlog rotations.
+  background, which could eliminate all stalls around binlog rotations.
 */
 pthread_handler_t
 binlog_background_thread(void *arg __attribute__((unused)))

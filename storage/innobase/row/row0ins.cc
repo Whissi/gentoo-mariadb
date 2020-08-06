@@ -95,35 +95,22 @@ ins_node_create(
 	return(node);
 }
 
-/***********************************************************//**
-Creates an entry template for each index of a table. */
-static
-void
-ins_node_create_entry_list(
-/*=======================*/
-	ins_node_t*	node)	/*!< in: row insert node */
+/** Create an row template for each index of a table. */
+static void ins_node_create_entry_list(ins_node_t *node)
 {
-	dict_index_t*	index;
-	dtuple_t*	entry;
+  node->entry_list.reserve(UT_LIST_GET_LEN(node->table->indexes));
 
-	ut_ad(node->entry_sys_heap);
-
-	/* We will include all indexes (include those corrupted
-	secondary indexes) in the entry list. Filtration of
-	these corrupted index will be done in row_ins() */
-
-	node->entry_list.reserve(UT_LIST_GET_LEN(node->table->indexes));
-
-	for (index = dict_table_get_first_index(node->table);
-	     index != 0;
-	     index = dict_table_get_next_index(index)) {
-
-		entry = row_build_index_entry_low(
-			node->row, NULL, index, node->entry_sys_heap,
-			ROW_BUILD_FOR_INSERT);
-
-		node->entry_list.push_back(entry);
-	}
+  for (dict_index_t *index= dict_table_get_first_index(node->table); index;
+       index= dict_table_get_next_index(index))
+  {
+    /* Corrupted or incomplete secondary indexes will be filtered out in
+    row_ins(). */
+    dtuple_t *entry= index->online_status >= ONLINE_INDEX_ABORTED
+      ? dtuple_create(node->entry_sys_heap, 0)
+      : row_build_index_entry_low(node->row, NULL, index, node->entry_sys_heap,
+				  ROW_BUILD_FOR_INSERT);
+    node->entry_list.push_back(entry);
+  }
 }
 
 /*****************************************************************//**
@@ -1285,8 +1272,10 @@ row_ins_foreign_check_on_constraint(
 
 		update->info_bits = 0;
 		update->n_fields = foreign->n_fields;
-		UNIV_MEM_INVALID(update->fields,
-				 update->n_fields * sizeof *update->fields);
+#ifdef HAVE_valgrind_or_MSAN
+		MEM_UNDEFINED(update->fields,
+			      update->n_fields * sizeof *update->fields);
+#endif /* HAVE_valgrind_or_MSAN */
 
 		bool affects_fulltext = false;
 
@@ -2907,7 +2896,7 @@ row_ins_sec_index_entry_low(
 		err = btr_cur_search_to_nth_level(
 			index, 0, entry, PAGE_CUR_RTREE_INSERT,
 			search_mode,
-			&cursor, 0, __FILE__, __LINE__, &mtr);
+			&cursor, 0, __FILE__, __LINE__, &mtr, 0);
 
 		if (mode == BTR_MODIFY_LEAF && rtr_info.mbr_adj) {
 			mtr_commit(&mtr);
@@ -2922,7 +2911,7 @@ row_ins_sec_index_entry_low(
 			err = btr_cur_search_to_nth_level(
 				index, 0, entry, PAGE_CUR_RTREE_INSERT,
 				search_mode,
-				&cursor, 0, __FILE__, __LINE__, &mtr);
+				&cursor, 0, __FILE__, __LINE__, &mtr, 0);
 			mode = BTR_MODIFY_TREE;
 		}
 
@@ -2934,7 +2923,7 @@ row_ins_sec_index_entry_low(
 		err = btr_cur_search_to_nth_level(
 			index, 0, entry, PAGE_CUR_LE,
 			search_mode,
-			&cursor, 0, __FILE__, __LINE__, &mtr);
+			&cursor, 0, __FILE__, __LINE__, &mtr, 0);
 	}
 
 	if (err != DB_SUCCESS) {
@@ -3028,7 +3017,7 @@ row_ins_sec_index_entry_low(
 			index, 0, entry, PAGE_CUR_LE,
 			(search_mode
 			 & ~(BTR_INSERT | BTR_IGNORE_SEC_UNIQUE)),
-			&cursor, 0, __FILE__, __LINE__, &mtr);
+			&cursor, 0, __FILE__, __LINE__, &mtr, 0);
 	}
 
 	if (row_ins_must_modify_rec(&cursor)) {

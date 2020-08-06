@@ -2,7 +2,7 @@
 
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2019, MariaDB Corporation.
+Copyright (c) 2013, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -634,12 +634,12 @@ struct dict_col_t{
 					this column. Our current max limit is
 					3072 for Barracuda table */
 
-	/** @return whether this is a virtual column */
-	bool is_virtual() const { return prtype & DATA_VIRTUAL; }
+  /** @return whether this is a virtual column */
+  bool is_virtual() const { return prtype & DATA_VIRTUAL; }
 
-	/** Detach the column from an index.
-	@param[in]	index	index to be detached from */
-	inline void detach(const dict_index_t& index);
+  /** Detach a virtual column from an index.
+  @param index  being-freed index */
+  inline void detach(const dict_index_t &index);
 };
 
 /** Index information put in a list of virtual column structure. Index
@@ -831,6 +831,9 @@ struct dict_index_t{
 	dict_table_t*	table;	/*!< back pointer to table */
 	unsigned	space:32;
 				/*!< space where the index tree is placed */
+	/** root page number, or FIL_NULL if the index has been detached
+	from storage (DISCARD TABLESPACE or similar),
+	or 1 if the index is in table->freed_indexes */
 	unsigned	page:32;/*!< index tree root page number */
 	unsigned	merge_threshold:6;
 				/*!< In the pessimistic delete, if the page
@@ -964,7 +967,8 @@ struct dict_index_t{
 				/* in which slot the next sample should be
 				saved. */
 	/* @} */
-	rtr_ssn_t	rtr_ssn;/*!< Node sequence number for RTree */
+	/** R-tree split sequence number */
+	volatile int32	rtr_ssn;
 	rtr_info_track_t*
 			rtr_track;/*!< tracking all R-Tree search cursors */
 	trx_id_t	trx_id; /*!< id of the transaction that created this
@@ -1013,17 +1017,36 @@ struct dict_index_t{
 	/** @return whether the index is corrupted */
 	inline bool is_corrupted() const;
 
-	/** Detach the columns from the index that is to be freed. */
-	void detach_columns()
-	{
-		if (has_virtual()) {
-			for (unsigned i = 0; i < n_fields; i++) {
-				fields[i].col->detach(*this);
-			}
+  /** Detach the virtual columns from the index that is to be removed.
+  @param   whether to reset fields[].col */
+  void detach_columns(bool clear= false)
+  {
+    if (!has_virtual())
+      return;
+    for (unsigned i= 0; i < n_fields; i++)
+    {
+      dict_col_t* col= fields[i].col;
+      if (!col || !col->is_virtual())
+        continue;
+      col->detach(*this);
+      if (clear)
+        fields[i].col= NULL;
+    }
+  }
 
-			n_fields = 0;
-		}
-	}
+#ifdef BTR_CUR_HASH_ADAPT
+  /** @return a clone of this */
+  dict_index_t* clone() const;
+  /** Clone this index for lazy dropping of the adaptive hash index.
+  @return this or a clone */
+  dict_index_t* clone_if_needed();
+  /** @return number of leaf pages pointed to by the adaptive hash index */
+  inline ulint n_ahi_pages() const;
+  /** @return whether mark_freed() had been invoked */
+  bool freed() const { return UNIV_UNLIKELY(page == 1); }
+  /** Note that the index is waiting for btr_search_lazy_free() */
+  void set_freed() { ut_ad(!freed()); page= 1; }
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	/** This ad-hoc class is used by record_size_info only.	*/
 	class record_size_info_t {
@@ -1086,24 +1109,24 @@ struct dict_index_t{
 	inline record_size_info_t record_size_info() const;
 };
 
-/** Detach a column from an index.
-@param[in]	index	index to be detached from */
-inline void dict_col_t::detach(const dict_index_t& index)
+/** Detach a virtual column from an index.
+@param index  being-freed index */
+inline void dict_col_t::detach(const dict_index_t &index)
 {
-	if (!is_virtual()) {
-		return;
-	}
+  ut_ad(is_virtual());
 
-	if (dict_v_idx_list* v_indexes = reinterpret_cast<const dict_v_col_t*>
-	    (this)->v_indexes) {
-		for (dict_v_idx_list::iterator i = v_indexes->begin();
-		     i != v_indexes->end(); i++) {
-			if (i->index == &index) {
-				v_indexes->erase(i);
-				return;
-			}
-		}
-	}
+  if (dict_v_idx_list *v_indexes= reinterpret_cast<const dict_v_col_t*>(this)
+      ->v_indexes)
+  {
+    for (dict_v_idx_list::iterator i= v_indexes->begin();
+         i != v_indexes->end(); i++)
+    {
+      if (i->index == &index) {
+        v_indexes->erase(i);
+        return;
+      }
+    }
+  }
 }
 
 /** The status of online index creation */
@@ -1604,6 +1627,11 @@ struct dict_table_t {
 
 	/** List of indexes of the table. */
 	UT_LIST_BASE_NODE_T(dict_index_t)	indexes;
+#ifdef BTR_CUR_HASH_ADAPT
+	/** List of detached indexes that are waiting to be freed along with
+	the last adaptive hash index entry */
+	UT_LIST_BASE_NODE_T(dict_index_t)	freed_indexes;
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	/** List of foreign key constraints in the table. These refer to
 	columns in other tables. */

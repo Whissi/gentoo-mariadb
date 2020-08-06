@@ -415,6 +415,7 @@ btr_cur_optimistic_latch_leaves(
 {
 	ulint		mode;
 	ulint		left_page_no;
+	ulint		curr_page_no;
 
 	switch (*latch_mode) {
 	case BTR_SEARCH_LEAF:
@@ -441,6 +442,8 @@ btr_cur_optimistic_latch_leaves(
 
 			goto unpin_failed;
 		}
+
+		curr_page_no = block->page.id.page_no();
 		left_page_no = btr_page_get_prev(
 			buf_block_get_frame(block));
 		rw_lock_s_unlock(&block->lock);
@@ -449,11 +452,26 @@ btr_cur_optimistic_latch_leaves(
 			const page_id_t	page_id(
 				dict_index_get_space(cursor->index),
 				left_page_no);
+			dberr_t	err = DB_SUCCESS;
 
-			cursor->left_block = btr_block_get(
+			cursor->left_block = buf_page_get_gen(
 				page_id,
 				dict_table_page_size(cursor->index->table),
-				mode, cursor->index, mtr);
+				mode, NULL, BUF_GET_POSSIBLY_FREED,
+				__FILE__, __LINE__, mtr, &err);
+
+			if (err == DB_DECRYPTION_FAILED) {
+				cursor->index->table->file_unreadable = true;
+			}
+
+			if (btr_page_get_next(buf_block_get_frame(
+					cursor->left_block))
+			    != curr_page_no) {
+				/* release the left block */
+				btr_leaf_page_release(
+					cursor->left_block, mode, mtr);
+				goto unpin_failed;
+			}
 		} else {
 			cursor->left_block = NULL;
 		}
@@ -864,8 +882,7 @@ search tuple should be performed in the B-tree. InnoDB does an insert
 immediately after the cursor. Thus, the cursor may end up on a user record,
 or on a page infimum record. */
 dberr_t
-btr_cur_search_to_nth_level(
-/*========================*/
+btr_cur_search_to_nth_level_func(
 	dict_index_t*	index,	/*!< in: index */
 	ulint		level,	/*!< in: the tree level of search */
 	const dtuple_t*	tuple,	/*!< in: data tuple; NOTE: n_fields_cmp in
@@ -887,10 +904,12 @@ btr_cur_search_to_nth_level(
 				to protect the record! */
 	btr_cur_t*	cursor, /*!< in/out: tree cursor; the cursor page is
 				s- or x-latched, but see also above! */
+#ifdef BTR_CUR_HASH_ADAPT
 	ulint		has_search_latch,
 				/*!< in: info on the latch mode the
 				caller currently has on search system:
 				RW_S_LATCH, or 0 */
+#endif /* BTR_CUR_HASH_ADAPT */
 	const char*	file,	/*!< in: file name */
 	unsigned	line,	/*!< in: line where called */
 	mtr_t*		mtr,	/*!< in: mtr */
@@ -960,10 +979,12 @@ btr_cur_search_to_nth_level(
 	ut_ad(!(index->type & DICT_FTS));
 	ut_ad(index->page != FIL_NULL);
 
-	UNIV_MEM_INVALID(&cursor->up_match, sizeof cursor->up_match);
-	UNIV_MEM_INVALID(&cursor->up_bytes, sizeof cursor->up_bytes);
-	UNIV_MEM_INVALID(&cursor->low_match, sizeof cursor->low_match);
-	UNIV_MEM_INVALID(&cursor->low_bytes, sizeof cursor->low_bytes);
+#ifdef HAVE_valgrind_or_MSAN
+	MEM_UNDEFINED(&cursor->up_match, sizeof cursor->up_match);
+	MEM_UNDEFINED(&cursor->up_bytes, sizeof cursor->up_bytes);
+	MEM_UNDEFINED(&cursor->low_match, sizeof cursor->low_match);
+	MEM_UNDEFINED(&cursor->low_bytes, sizeof cursor->low_bytes);
+#endif /* HAVE_valgrind_or_MSAN */
 #ifdef UNIV_DEBUG
 	cursor->up_match = ULINT_UNDEFINED;
 	cursor->low_match = ULINT_UNDEFINED;
@@ -1053,6 +1074,7 @@ btr_cur_search_to_nth_level(
 	}
 
 #ifdef BTR_CUR_HASH_ADAPT
+	rw_lock_t* const search_latch = btr_get_search_latch(index);
 
 # ifdef UNIV_SEARCH_PERF_STAT
 	info->n_searches++;
@@ -1073,8 +1095,7 @@ btr_cur_search_to_nth_level(
 	    will have to check it again. */
 	    && btr_search_enabled
 	    && !modify_external
-	    && rw_lock_get_writer(btr_get_search_latch(index))
-	    == RW_LOCK_NOT_LOCKED
+	    && rw_lock_get_writer(search_latch) == RW_LOCK_NOT_LOCKED
 	    && btr_search_guess_on_hash(index, info, tuple, mode,
 					latch_mode, cursor,
 					has_search_latch, mtr)) {
@@ -1098,10 +1119,12 @@ btr_cur_search_to_nth_level(
 	/* If the hash search did not succeed, do binary search down the
 	tree */
 
+#ifdef BTR_CUR_HASH_ADAPT
 	if (has_search_latch) {
 		/* Release possible search latch to obey latching order */
-		btr_search_s_unlock(index);
+		rw_lock_s_unlock(search_latch);
 	}
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	/* Store the position of the tree latch we push to mtr so that we
 	know how to release it when we have latched leaf node(s) */
@@ -1475,10 +1498,9 @@ retry_page_get:
 				node_seq_t      root_seq_no;
 
 				root_seq_no = page_get_ssn_id(page);
-
-				mutex_enter(&(index->rtr_ssn.mutex));
-				index->rtr_ssn.seq_no = root_seq_no + 1;
-				mutex_exit(&(index->rtr_ssn.mutex));
+				my_atomic_store32_explicit(
+					&index->rtr_ssn, root_seq_no + 1,
+					MY_MEMORY_ORDER_RELAXED);
 			}
 
 			/* Save the MBR */
@@ -2156,9 +2178,11 @@ func_exit:
 		ut_free(prev_tree_savepoints);
 	}
 
+#ifdef BTR_CUR_HASH_ADAPT
 	if (has_search_latch) {
-		btr_search_s_lock(index);
+		rw_lock_s_lock(search_latch);
 	}
+#endif /* BTR_CUR_HASH_ADAPT */
 
 	if (mbr_adj) {
 		/* remember that we will need to adjust parent MBR */
@@ -3051,7 +3075,7 @@ btr_cur_optimistic_insert(
 	page_t*		page;
 	rec_t*		dummy;
 	ibool		leaf;
-	ibool		reorg;
+	ibool		reorg __attribute__((unused));
 	ibool		inherit = TRUE;
 	ulint		rec_size;
 	dberr_t		err;
@@ -3071,12 +3095,12 @@ btr_cur_optimistic_insert(
 
 	const page_size_t&	page_size = block->page.size;
 
-#ifdef UNIV_DEBUG_VALGRIND
+#ifdef HAVE_valgrind_or_MSAN
 	if (page_size.is_compressed()) {
-		UNIV_MEM_ASSERT_RW(page, page_size.logical());
-		UNIV_MEM_ASSERT_RW(block->page.zip.data, page_size.physical());
+		MEM_CHECK_DEFINED(page, page_size.logical());
+		MEM_CHECK_DEFINED(block->page.zip.data, page_size.physical());
 	}
-#endif /* UNIV_DEBUG_VALGRIND */
+#endif /* HAVE_valgrind_or_MSAN */
 
 	leaf = page_is_leaf(page);
 
@@ -3994,7 +4018,7 @@ btr_cur_optimistic_update(
 				   ULINT_UNDEFINED, heap);
 #if defined UNIV_DEBUG || defined UNIV_BLOB_LIGHT_DEBUG
 	ut_a(!rec_offs_any_null_extern(rec, *offsets)
-	     || trx_is_recv(thr_get_trx(thr)));
+	     || thr_get_trx(thr) == trx_roll_crash_recv_trx);
 #endif /* UNIV_DEBUG || UNIV_BLOB_LIGHT_DEBUG */
 
 	if (!row_upd_changes_field_size_or_external(index, *offsets, update)) {
@@ -5747,7 +5771,7 @@ btr_estimate_n_rows_in_range_low(
 		btr_cur_search_to_nth_level(index, 0, tuple1, mode1,
 					    BTR_SEARCH_LEAF | BTR_ESTIMATE,
 					    &cursor, 0,
-					    __FILE__, __LINE__, &mtr);
+					    __FILE__, __LINE__, &mtr, 0);
 
 		ut_ad(!page_rec_is_infimum(btr_cur_get_rec(&cursor)));
 
@@ -5801,7 +5825,7 @@ btr_estimate_n_rows_in_range_low(
 		btr_cur_search_to_nth_level(index, 0, tuple2, mode2,
 					    BTR_SEARCH_LEAF | BTR_ESTIMATE,
 					    &cursor, 0,
-					    __FILE__, __LINE__, &mtr);
+					    __FILE__, __LINE__, &mtr, 0);
 
 		const rec_t*	rec = btr_cur_get_rec(&cursor);
 
@@ -6627,29 +6651,19 @@ btr_blob_free(
 	mtr_t*		mtr)	/*!< in: mini-transaction to commit */
 {
 	buf_pool_t*	buf_pool = buf_pool_from_block(block);
-	ulint		space = block->page.id.space();
-	ulint		page_no	= block->page.id.page_no();
-
+	const page_id_t	page_id = block->page.id;
 	ut_ad(mtr_is_block_fix(mtr, block, MTR_MEMO_PAGE_X_FIX, index->table));
-
 	mtr_commit(mtr);
 
 	buf_pool_mutex_enter(buf_pool);
 
-	/* Only free the block if it is still allocated to
-	the same file page. */
-
-	if (buf_block_get_state(block)
-	    == BUF_BLOCK_FILE_PAGE
-	    && block->page.id.space() == space
-	    && block->page.id.page_no() == page_no) {
-
-		if (!buf_LRU_free_page(&block->page, all)
-		    && all && block->page.zip.data) {
+	if (buf_page_t* bpage = buf_page_hash_get(buf_pool, page_id)) {
+		if (!buf_LRU_free_page(bpage, all)
+		    && all && bpage->zip.data) {
 			/* Attempt to deallocate the uncompressed page
 			if the whole block cannot be deallocted. */
 
-			buf_LRU_free_page(&block->page, false);
+			buf_LRU_free_page(bpage, false);
 		}
 	}
 
@@ -6898,9 +6912,7 @@ btr_store_big_rec_extern_fields(
 			     BTR_EXTERN_FIELD_REF_SIZE));
 #endif /* UNIV_DEBUG || UNIV_BLOB_LIGHT_DEBUG */
 		extern_len = big_rec_vec->fields[i].len;
-		UNIV_MEM_ASSERT_RW(big_rec_vec->fields[i].data,
-				   extern_len);
-
+		MEM_CHECK_DEFINED(big_rec_vec->fields[i].data, extern_len);
 		ut_a(extern_len > 0);
 
 		prev_page_no = FIL_NULL;
@@ -7567,7 +7579,7 @@ btr_copy_blob_prefix(
 		mtr_commit(&mtr);
 
 		if (page_no == FIL_NULL || copy_len != part_len) {
-			UNIV_MEM_ASSERT_RW(buf, copied_len);
+			MEM_CHECK_DEFINED(buf, copied_len);
 			return(copied_len);
 		}
 
@@ -7723,7 +7735,7 @@ end_of_blob:
 func_exit:
 	inflateEnd(&d_stream);
 	mem_heap_free(heap);
-	UNIV_MEM_ASSERT_RW(buf, d_stream.total_out);
+	MEM_CHECK_DEFINED(buf, d_stream.total_out);
 	return(d_stream.total_out);
 }
 

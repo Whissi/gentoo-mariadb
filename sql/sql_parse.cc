@@ -913,11 +913,6 @@ void execute_init_command(THD *thd, LEX_STRING *init_command,
   char *buf= thd->strmake(init_command->str, len);
   mysql_rwlock_unlock(var_lock);
 
-#if defined(ENABLED_PROFILING)
-  thd->profiling.start_new_query();
-  thd->profiling.set_query_source(buf, len);
-#endif
-
   THD_STAGE_INFO(thd, stage_execution_of_init_command);
   save_client_capabilities= thd->client_capabilities;
   thd->client_capabilities|= CLIENT_MULTI_QUERIES;
@@ -932,9 +927,6 @@ void execute_init_command(THD *thd, LEX_STRING *init_command,
   thd->client_capabilities= save_client_capabilities;
   thd->net.vio= save_vio;
 
-#if defined(ENABLED_PROFILING)
-  thd->profiling.finish_current_query();
-#endif
 }
 
 
@@ -5998,7 +5990,8 @@ finish:
   lex->unit.cleanup();
 
   /* close/reopen tables that were marked to need reopen under LOCK TABLES */
-  if (! thd->lex->requires_prelocking())
+  if (unlikely(thd->locked_tables_list.some_table_marked_for_reopen) &&
+      !thd->lex->requires_prelocking())
     thd->locked_tables_list.reopen_tables(thd, true);
 
   if (! thd->in_sub_stmt)
@@ -7758,8 +7751,8 @@ void mysql_parse(THD *thd, char *rawbuf, uint length,
     sp_cache_enforce_limit(thd->sp_proc_cache, stored_program_cache_size);
     sp_cache_enforce_limit(thd->sp_func_cache, stored_program_cache_size);
     thd->end_statement();
+    thd->Item_change_list::rollback_item_tree_changes();
     thd->cleanup_after_query();
-    DBUG_ASSERT(thd->Item_change_list::is_empty());
   }
   else
   {
@@ -8563,6 +8556,11 @@ bool st_select_lex::add_window_def(THD *thd,
                                                       win_frame);
   group_list= thd->lex->save_group_list;
   order_list= thd->lex->save_order_list;
+  if (parsing_place != SELECT_LIST)
+  {
+    fields_in_window_functions+= win_part_list_ptr->elements +
+                                 win_order_list_ptr->elements;
+  }
   return (win_def == NULL || window_specs.push_back(win_def));
 }
 
@@ -8584,6 +8582,11 @@ bool st_select_lex::add_window_spec(THD *thd,
                                                          win_frame);
   group_list= thd->lex->save_group_list;
   order_list= thd->lex->save_order_list;
+  if (parsing_place != SELECT_LIST)
+  {
+    fields_in_window_functions+= win_part_list_ptr->elements +
+                                 win_order_list_ptr->elements;
+  }
   thd->lex->win_spec= win_spec;
   return (win_spec == NULL || window_specs.push_back(win_spec));
 }
