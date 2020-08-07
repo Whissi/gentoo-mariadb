@@ -1,0 +1,10 @@
+[Unit]
+Description=mcs-ddlproc
+PartOf=mcs-writeengineserver.service
+After=mcs-dmlproc.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/env bash -c "/bin/sleep 2 && @ENGINE_BINDIR@/DDLProc"
+Restart=on-failure
+TimeoutStopSec=2

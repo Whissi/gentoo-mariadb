@@ -1,0 +1,10 @@
+[Unit]
+Description=mcs-controllernode
+PartOf=mcs-workernode.service
+After=mcs-workernode.service
+
+[Service]
+Type=simple
+ExecStart=@ENGINE_BINDIR@/controllernode fg
+Restart=on-failure
+ExecStop=@ENGINE_BINDIR@/mcs-stop-controllernode.sh $MAINPID
