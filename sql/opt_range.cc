@@ -1852,6 +1852,9 @@ SEL_ARG::SEL_ARG(SEL_ARG &arg) :Sql_alloc()
   next_key_part=arg.next_key_part;
   max_part_no= arg.max_part_no;
   use_count=1; elements=1;
+  next= 0;
+  if (next_key_part)
+    ++next_key_part->use_count;
 }
 
 
@@ -7555,13 +7558,15 @@ SEL_TREE *Item_bool_func::get_full_func_mm_tree(RANGE_OPT_PARAM *param,
   table_map param_comp= ~(param->prev_tables | param->read_tables |
 		          param->current_table);
 #ifdef HAVE_SPATIAL
-  Field::geometry_type sav_geom_type;
-  const bool geometry= field_item->field->type() == MYSQL_TYPE_GEOMETRY;
-  if (geometry)
+  Field::geometry_type sav_geom_type= Field::GEOM_GEOMETRY, *geom_type=
+    field_item->field->type() == MYSQL_TYPE_GEOMETRY
+    ? &(static_cast<Field_geom*>(field_item->field))->geom_type
+    : NULL;
+  if (geom_type)
   {
-    sav_geom_type= ((Field_geom*) field_item->field)->geom_type;
+    sav_geom_type= *geom_type;
     /* We have to be able to store all sorts of spatial features here */
-    ((Field_geom*) field_item->field)->geom_type= Field::GEOM_GEOMETRY;
+    *geom_type= Field::GEOM_GEOMETRY;
   }
 #endif /*HAVE_SPATIAL*/
 
@@ -7592,9 +7597,9 @@ SEL_TREE *Item_bool_func::get_full_func_mm_tree(RANGE_OPT_PARAM *param,
   }
 
 #ifdef HAVE_SPATIAL
-  if (geometry)
+  if (geom_type)
   {
-    ((Field_geom*) field_item->field)->geom_type= sav_geom_type;
+    *geom_type= sav_geom_type;
   }
 #endif /*HAVE_SPATIAL*/
   DBUG_RETURN(ftree);
@@ -8867,9 +8872,15 @@ tree_or(RANGE_OPT_PARAM *param,SEL_TREE *tree1,SEL_TREE *tree2)
   }
   bool no_imerge_from_ranges= FALSE;
 
+  SEL_TREE *rt1= tree1;
+  SEL_TREE *rt2= tree2;
   /* Build the range part of the tree for the formula (1) */ 
   if (sel_trees_can_be_ored(param, tree1, tree2, &ored_keys))
   {
+    if (no_merges1)
+      rt1= new SEL_TREE(tree1, TRUE, param);
+    if (no_merges2)
+      rt2= new SEL_TREE(tree2, TRUE, param);
     bool must_be_ored= sel_trees_must_be_ored(param, tree1, tree2, ored_keys);
     no_imerge_from_ranges= must_be_ored;
 
@@ -8927,12 +8938,6 @@ tree_or(RANGE_OPT_PARAM *param,SEL_TREE *tree1,SEL_TREE *tree2)
   else if (!no_ranges1 && !no_ranges2 && !no_imerge_from_ranges)
   {
     /* Build the imerge part of the tree for the formula (1) */
-    SEL_TREE *rt1= tree1;
-    SEL_TREE *rt2= tree2;
-    if (no_merges1)
-      rt1= new SEL_TREE(tree1, TRUE, param);
-    if (no_merges2)
-      rt2= new SEL_TREE(tree2, TRUE, param);
     if (!rt1 || !rt2 ||
         result->merges.push_back(imerge_from_ranges) ||
         imerge_from_ranges->or_sel_tree(param, rt1) ||
@@ -9595,10 +9600,11 @@ key_or(RANGE_OPT_PARAM *param, SEL_ARG *key1,SEL_ARG *key2)
 
       if (!tmp->next_key_part)
       {
+	SEL_ARG *key2_next= key2->next;
         if (key2->use_count)
 	{
 	  SEL_ARG *key2_cpy= new SEL_ARG(*key2);
-          if (key2_cpy)
+          if (!key2_cpy)
             return 0;
           key2= key2_cpy;
 	}
@@ -9619,7 +9625,7 @@ key_or(RANGE_OPT_PARAM *param, SEL_ARG *key1,SEL_ARG *key2)
             Move on to next range in key2
           */
           key2->increment_use_count(-1); // Free not used tree
-          key2=key2->next;
+          key2=key2_next;
           continue;
         }
         else

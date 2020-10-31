@@ -96,20 +96,36 @@ operator<<(
 	return(s << ut_get_name(NULL, table_name.m_name));
 }
 
-/**********************************************************************//**
-Creates a table memory object.
-@return own: table object */
+/** @return whether a table belongs to a system database */
+static bool dict_mem_table_is_system(char *name)
+{
+	/* table has the following format: database/table
+	and some system table are of the form SYS_* */
+	if (strchr(name, '/')) {
+		size_t table_len = strlen(name);
+		const char *system_db;
+		int i = 0;
+		while ((system_db = innobase_system_databases[i++])
+			&& (system_db != NullS)) {
+			size_t len = strlen(system_db);
+			if (table_len > len && !strncmp(name, system_db, len)) {
+				return true;
+			}
+		}
+		return false;
+	} else {
+		return true;
+	}
+}
+
 dict_table_t*
 dict_mem_table_create(
-/*==================*/
-	const char*	name,	/*!< in: table name */
-	ulint		space,	/*!< in: space where the clustered index of
-				the table is placed */
-	ulint		n_cols,	/*!< in: total number of columns including
-				virtual and non-virtual columns */
-	ulint		n_v_cols,/*!< in: number of virtual columns */
-	ulint		flags,	/*!< in: table flags */
-	ulint		flags2)	/*!< in: table flags2 */
+	const char*	name,
+	ulint		space,
+	ulint		n_cols,
+	ulint		n_v_cols,
+	ulint		flags,
+	ulint		flags2)
 {
 	dict_table_t*	table;
 	mem_heap_t*	heap;
@@ -148,15 +164,8 @@ dict_mem_table_create(
 	table->v_cols = static_cast<dict_v_col_t*>(
 		mem_heap_alloc(heap, n_v_cols * sizeof(*table->v_cols)));
 
-	/* true means that the stats latch will be enabled -
-	dict_table_stats_lock() will not be noop. */
-	dict_table_stats_latch_create(table, true);
-
 	table->autoinc_lock = static_cast<ib_lock_t*>(
 		mem_heap_alloc(heap, lock_get_size()));
-
-	/* lazy creation of table autoinc latch */
-	dict_table_autoinc_create_lazy(table);
 
 	/* If the table has an FTS index or we are in the process
 	of building one, create the table->fts */
@@ -200,9 +209,7 @@ dict_mem_table_free(
 		}
 	}
 
-	dict_table_autoinc_destroy(table);
 	dict_mem_table_free_foreign_vcol_set(table);
-	dict_table_stats_latch_destroy(table);
 
 	table->foreign_set.~dict_foreign_set();
 	table->referenced_set.~dict_foreign_set();
@@ -745,7 +752,7 @@ dict_mem_index_create(
 	dict_mem_fill_index_struct(index, heap, table_name, index_name,
 				   space, type, n_fields);
 
-	dict_index_zip_pad_mutex_create_lazy(index);
+	mysql_mutex_init(0, &index->zip_pad.mutex, NULL);
 
 	if (type & DICT_SPATIAL) {
 		index->rtr_track = static_cast<rtr_info_track_t*>(
@@ -1060,7 +1067,7 @@ dict_mem_index_free(
 	ut_ad(index);
 	ut_ad(index->magic_n == DICT_INDEX_MAGIC_N);
 
-	dict_index_zip_pad_mutex_destroy(index);
+	mysql_mutex_destroy(&index->zip_pad.mutex);
 
 	if (dict_index_is_spatial(index)) {
 		rtr_info_active::iterator	it;
@@ -1195,31 +1202,20 @@ operator<< (std::ostream& out, const dict_foreign_set& fk_set)
 	return(out);
 }
 
-/****************************************************************//**
-Determines if a table belongs to a system database
-@return */
-bool
-dict_mem_table_is_system(
-/*================*/
-	char	*name)		/*!< in: table name */
+/** Check whether fulltext index gets affected by foreign
+key constraint. */
+bool dict_foreign_t::affects_fulltext() const
 {
-	ut_ad(name);
+  if (foreign_table == referenced_table || !foreign_table->fts)
+    return false;
 
-	/* table has the following format: database/table
-	and some system table are of the form SYS_* */
-	if (strchr(name, '/')) {
-		size_t table_len = strlen(name);
-		const char *system_db;
-		int i = 0;
-		while ((system_db = innobase_system_databases[i++])
-			&& (system_db != NullS)) {
-			size_t len = strlen(system_db);
-			if (table_len > len && !strncmp(name, system_db, len)) {
-				return true;
-			}
-		}
-		return false;
-	} else {
-		return true;
-	}
+  for (ulint i= 0; i < n_fields; i++)
+  {
+    const dict_col_t *col= dict_index_get_nth_col(foreign_index, i);
+    if (dict_table_is_fts_column(foreign_table->fts->indexes, col->ind,
+                                 col->is_virtual()) != ULINT_UNDEFINED)
+      return true;
+  }
+
+  return false;
 }

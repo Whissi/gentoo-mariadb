@@ -965,6 +965,8 @@ fail:
 					 }
 			 });
 
+			DBUG_EXECUTE_IF("log_checksum_mismatch", { cksum = crc + 1; });
+
 			if (crc != cksum) {
 				ib::error() << "Invalid log block checksum."
 					    << " block: " << block_number
@@ -1223,7 +1225,10 @@ recv_log_recover_10_3()
 			% univ_page_size.physical()),
 	       OS_FILE_LOG_BLOCK_SIZE, buf, NULL);
 
-	if (log_block_calc_checksum(buf) != log_block_get_checksum(buf)) {
+	const ulint cksum = log_block_get_checksum(buf);
+
+	if (cksum != LOG_NO_CHECKSUM_MAGIC
+	    && cksum != log_block_calc_checksum_crc32(buf)) {
 		return(DB_CORRUPTION);
 	}
 
@@ -2359,7 +2364,6 @@ init_fail:
   {
     i.created = true;
     buf_block_dbg_add_level(block, SYNC_NO_ORDER_CHECK);
-    mtr.x_latch_at_savepoint(0, block);
     recv_recover_page(block, mtr, recv_addr, i.lsn);
     ut_ad(mtr.has_committed());
   }

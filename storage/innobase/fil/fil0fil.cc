@@ -605,6 +605,14 @@ static bool fil_node_open_file(fil_node_t* node)
 
 	const bool first_time_open = node->size == 0;
 
+	bool o_direct_possible = !FSP_FLAGS_HAS_PAGE_COMPRESSION(space->flags);
+	if (const ulint ssize = FSP_FLAGS_GET_ZIP_SSIZE(space->flags)) {
+		compile_time_assert(((UNIV_ZIP_SIZE_MIN >> 1) << 3) == 4096);
+		if (ssize < 3) {
+			o_direct_possible = false;
+		}
+	}
+
 	if (first_time_open
 	    || (space->purpose == FIL_TYPE_TABLESPACE
 		&& node == UT_LIST_GET_FIRST(space->chain)
@@ -623,7 +631,12 @@ retry:
 			node->is_raw_disk
 			? OS_FILE_OPEN_RAW | OS_FILE_ON_ERROR_NO_EXIT
 			: OS_FILE_OPEN | OS_FILE_ON_ERROR_NO_EXIT,
-			OS_FILE_AIO, OS_DATA_FILE, read_only_mode, &success);
+			OS_FILE_AIO,
+			o_direct_possible
+			? OS_DATA_FILE
+			: OS_DATA_FILE_NO_O_DIRECT,
+			read_only_mode,
+			&success);
 
 		if (!success) {
 			/* The following call prints an error message */
@@ -654,7 +667,12 @@ retry:
 			node->is_raw_disk
 			? OS_FILE_OPEN_RAW | OS_FILE_ON_ERROR_NO_EXIT
 			: OS_FILE_OPEN | OS_FILE_ON_ERROR_NO_EXIT,
-			OS_FILE_AIO, OS_DATA_FILE, read_only_mode, &success);
+			OS_FILE_AIO,
+			o_direct_possible
+			? OS_DATA_FILE
+			: OS_DATA_FILE_NO_O_DIRECT,
+			read_only_mode,
+			&success);
 	}
 
 	if (space->purpose != FIL_TYPE_LOG) {
@@ -5416,51 +5434,6 @@ fil_delete_file(
 	}
 }
 
-/**
-Iterate over all the spaces in the space list and fetch the
-tablespace names. It will return a copy of the name that must be
-freed by the caller using: delete[].
-@return DB_SUCCESS if all OK. */
-dberr_t
-fil_get_space_names(
-/*================*/
-	space_name_list_t&	space_name_list)
-				/*!< in/out: List to append to */
-{
-	fil_space_t*	space;
-	dberr_t		err = DB_SUCCESS;
-
-	mutex_enter(&fil_system->mutex);
-
-	for (space = UT_LIST_GET_FIRST(fil_system->space_list);
-	     space != NULL;
-	     space = UT_LIST_GET_NEXT(space_list, space)) {
-
-		if (space->purpose == FIL_TYPE_TABLESPACE) {
-			ulint	len;
-			char*	name;
-
-			len = ::strlen(space->name);
-			name = UT_NEW_ARRAY_NOKEY(char, len + 1);
-
-			if (name == 0) {
-				/* Caller to free elements allocated so far. */
-				err = DB_OUT_OF_MEMORY;
-				break;
-			}
-
-			memcpy(name, space->name, len);
-			name[len] = 0;
-
-			space_name_list.push_back(name);
-		}
-	}
-
-	mutex_exit(&fil_system->mutex);
-
-	return(err);
-}
-
 /** Generate redo log for swapping two .ibd files
 @param[in]	old_table	old table
 @param[in]	new_table	new table
@@ -5890,136 +5863,6 @@ fil_space_t::release_free_extents(ulint	n_reserved)
 
 	ut_a(n_reserved_extents >= n_reserved);
 	n_reserved_extents -= n_reserved;
-}
-
-/** Return the next fil_space_t.
-Once started, the caller must keep calling this until it returns NULL.
-fil_space_acquire() and fil_space_release() are invoked here which
-blocks a concurrent operation from dropping the tablespace.
-@param[in]	prev_space	Pointer to the previous fil_space_t.
-If NULL, use the first fil_space_t on fil_system->space_list.
-@return pointer to the next fil_space_t.
-@retval NULL if this was the last*/
-fil_space_t*
-fil_space_next(fil_space_t* prev_space)
-{
-	fil_space_t*		space=prev_space;
-
-	mutex_enter(&fil_system->mutex);
-
-	if (prev_space == NULL) {
-		space = UT_LIST_GET_FIRST(fil_system->space_list);
-
-		/* We can trust that space is not NULL because at least the
-		system tablespace is always present and loaded first. */
-		space->n_pending_ops++;
-	} else {
-		ut_ad(space->n_pending_ops > 0);
-
-		/* Move on to the next fil_space_t */
-		space->n_pending_ops--;
-		space = UT_LIST_GET_NEXT(space_list, space);
-
-		/* Skip spaces that are being created by
-		fil_ibd_create(), or dropped, or !tablespace. */
-		while (space != NULL
-			&& (UT_LIST_GET_LEN(space->chain) == 0
-			    || space->is_stopping()
-			    || space->purpose != FIL_TYPE_TABLESPACE)) {
-			space = UT_LIST_GET_NEXT(space_list, space);
-		}
-
-		if (space != NULL) {
-			space->n_pending_ops++;
-		}
-	}
-
-	mutex_exit(&fil_system->mutex);
-
-	return(space);
-}
-
-/**
-Remove space from key rotation list if there are no more
-pending operations.
-@param[in,out]	space		Tablespace */
-static
-void
-fil_space_remove_from_keyrotation(fil_space_t* space)
-{
-	ut_ad(mutex_own(&fil_system->mutex));
-	ut_ad(space);
-
-	if (space->n_pending_ops == 0 && space->is_in_rotation_list) {
-		ut_a(!fil_system->rotation_list.empty());
-		fil_system->rotation_list.remove(*space);
-		space->is_in_rotation_list = false;
-	}
-}
-
-
-/** Return the next fil_space_t from key rotation list.
-Once started, the caller must keep calling this until it returns NULL.
-fil_space_acquire() and fil_space_release() are invoked here which
-blocks a concurrent operation from dropping the tablespace.
-@param[in]	prev_space	Previous tablespace or NULL to start
-				from beginning of fil_system->rotation list
-@param[in]	recheck		recheck of the tablespace is needed or
-				still encryption thread does write page0 for it
-@param[in]	key_version	key version of the key state thread
-If NULL, use the first fil_space_t on fil_system->space_list.
-@return pointer to the next fil_space_t.
-@retval NULL if this was the last */
-fil_space_t *fil_system_t::keyrotate_next(fil_space_t *prev_space,
-                                          bool recheck, uint key_version)
-{
-  mutex_enter(&fil_system->mutex);
-
-  /* If one of the encryption threads already started the encryption
-  of the table then don't remove the unencrypted spaces from rotation list
-
-  If there is a change in innodb_encrypt_tables variables value then
-  don't remove the last processed tablespace from the rotation list. */
-  const bool remove= (!recheck || prev_space->crypt_data) &&
-                     !key_version == !srv_encrypt_tables;
-  sized_ilist<fil_space_t, rotation_list_tag_t>::iterator it=
-      prev_space == NULL ? fil_system->rotation_list.end() : prev_space;
-
-  if (it == fil_system->rotation_list.end())
-  {
-    it= fil_system->rotation_list.begin();
-  }
-  else
-  {
-    ut_ad(prev_space->n_pending_ops > 0);
-
-    /* Move on to the next fil_space_t */
-    prev_space->n_pending_ops--;
-
-    ++it;
-
-    while (it != fil_system->rotation_list.end() &&
-           (UT_LIST_GET_LEN(it->chain) == 0 || it->is_stopping()))
-    {
-      ++it;
-    }
-
-    if (remove)
-    {
-      fil_space_remove_from_keyrotation(prev_space);
-    }
-  }
-
-  fil_space_t *space= it == fil_system->rotation_list.end() ? NULL : &*it;
-
-  if (space)
-  {
-    space->n_pending_ops++;
-  }
-
-  mutex_exit(&fil_system->mutex);
-
-  return space;
 }
 
 /** Determine the block size of the data file.

@@ -2573,6 +2573,11 @@ fts_optimize_remove_table(
 	if (fts_opt_start_shutdown) {
 		ib::info() << "Try to remove table " << table->name
 			<< " after FTS optimize thread exiting.";
+		/* If the table can't be removed then wait till
+		fts optimize thread shuts down */
+		while (fts_optimize_wq) {
+			os_thread_sleep(10000);
+		}
 		return;
 	}
 
@@ -2603,9 +2608,13 @@ fts_optimize_remove_table(
 
 	os_event_destroy(event);
 
-	ut_d(mutex_enter(&fts_optimize_wq->mutex));
-	ut_ad(!table->fts->in_queue);
-	ut_d(mutex_exit(&fts_optimize_wq->mutex));
+#ifdef UNIV_DEBUG
+	if (!fts_opt_start_shutdown) {
+		mutex_enter(&fts_optimize_wq->mutex);
+		ut_ad(!table->fts->in_queue);
+		mutex_exit(&fts_optimize_wq->mutex);
+	}
+#endif /* UNIV_DEBUG */
 }
 
 /** Send sync fts cache for the table.

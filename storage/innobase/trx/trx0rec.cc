@@ -1950,8 +1950,7 @@ dberr_t trx_undo_report_rename(trx_t* trx, const dict_table_t* table)
 		buf_block_t* block = buf_page_get_gen(
 			page_id_t(undo->space, undo->last_page_no),
 			univ_page_size, RW_X_LATCH,
-			buf_pool_is_obsolete(undo->withdraw_clock)
-			? NULL : undo->guess_block,
+			undo->guess_block,
 			BUF_GET, __FILE__, __LINE__, &mtr, &err);
 		ut_ad((err == DB_SUCCESS) == !!block);
 
@@ -1962,7 +1961,6 @@ dberr_t trx_undo_report_rename(trx_t* trx, const dict_table_t* table)
 
 			if (ulint offset = trx_undo_page_report_rename(
 				    trx, table, block, &mtr)) {
-				undo->withdraw_clock = buf_withdraw_clock;
 				undo->empty = FALSE;
 				undo->top_page_no = undo->last_page_no;
 				undo->top_offset  = offset;
@@ -2084,8 +2082,7 @@ trx_undo_report_row_operation(
 
 	undo_block = buf_page_get_gen(
 		page_id_t(undo->space, page_no), univ_page_size, RW_X_LATCH,
-		buf_pool_is_obsolete(undo->withdraw_clock)
-		? NULL : undo->guess_block, BUF_GET, __FILE__, __LINE__,
+		undo->guess_block, BUF_GET, __FILE__, __LINE__,
 		&mtr, &err);
 
 	buf_block_dbg_add_level(undo_block, SYNC_TRX_UNDO_PAGE);
@@ -2138,14 +2135,13 @@ trx_undo_report_row_operation(
 			mtr_commit(&mtr);
 		} else {
 			/* Success */
-			undo->withdraw_clock = buf_withdraw_clock;
+			undo->guess_block = undo_block;
 			mtr_commit(&mtr);
 
 			undo->empty = FALSE;
 			undo->top_page_no = page_no;
 			undo->top_offset  = offset;
 			undo->top_undo_no = trx->undo_no++;
-			undo->guess_block = undo_block;
 
 			trx->undo_rseg_space = rseg->space;
 
@@ -2446,7 +2442,11 @@ trx_undo_prev_version_build(
 		/* The page containing the clustered index record
 		corresponding to entry is latched in mtr.  Thus the
 		following call is safe. */
-		row_upd_index_replace_new_col_vals(entry, index, update, heap);
+		if (!row_upd_index_replace_new_col_vals(entry, *index, update,
+							heap)) {
+			ut_a(v_status & TRX_UNDO_PREV_IN_PURGE);
+			return false;
+		}
 
 		/* Get number of externally stored columns in updated record */
 		const ulint n_ext = dtuple_get_n_ext(entry);

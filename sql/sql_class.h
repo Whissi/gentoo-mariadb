@@ -5449,6 +5449,8 @@ struct SORT_FIELD_ATTR
 {
   uint length;          /* Length of sort field */
   uint suffix_length;   /* Length suffix (0-4) */
+  enum Type { FIXED_SIZE, VARIABLE_SIZE } type;
+  bool is_variable_sized() { return type == VARIABLE_SIZE; }
 };
 
 
@@ -5782,11 +5784,11 @@ public:
 /**
   SP Bulk execution safe
 */
-#define CF_SP_BULK_SAFE (1U << 20)
+#define CF_PS_ARRAY_BINDING_SAFE (1U << 20)
 /**
   SP Bulk execution optimized
 */
-#define CF_SP_BULK_OPTIMIZED (1U << 21)
+#define CF_PS_ARRAY_BINDING_OPTIMIZED (1U << 21)
 
 /* Bits in server_command_flags */
 

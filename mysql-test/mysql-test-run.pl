@@ -1820,6 +1820,16 @@ sub command_line_setup {
     $opt_shutdown_timeout= 24 * 60;
     # One day for PID file creation (this is given in seconds not minutes)
     $opt_start_timeout= 24 * 60 * 60;
+    if ($opt_rr && open(my $fh, '<', '/proc/sys/kernel/perf_event_paranoid'))
+    {
+      my $perf_event_paranoid= <$fh>;
+      close $fh;
+      chomp $perf_event_paranoid;
+      if ($perf_event_paranoid == 0)
+      {
+        mtr_error("rr requires kernel.perf_event_paranoid set to 1");
+      }
+    }
   }
 
   # --------------------------------------------------------------------------
@@ -6408,7 +6418,7 @@ Examples:
 
 alias
 main.alias              'main' is the name of the suite for the 't' directory.
-rpl.rpl_invoked_features,mix,xtradb_plugin
+rpl.rpl_invoked_features,mix,innodb
 suite/rpl/t/rpl.rpl_invoked_features
 
 Options to control what engine/variation to run:
@@ -6536,7 +6546,7 @@ Options for debugging the product
   debug-server          Use debug version of server, but without turning on
                         tracing
   debugger=NAME         Start mysqld in the selected debugger
-  gdb                   Start the mysqld(s) in gdb
+  gdb[=gdb_arguments]   Start the mysqld(s) in gdb
   manual-debug          Let user manually start mysqld in debugger, before
                         running test(s)
   manual-gdb            Let user manually start mysqld in gdb, before running

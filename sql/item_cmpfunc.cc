@@ -891,6 +891,8 @@ int Arg_comparator::compare_decimal()
     {
       if (set_null)
         owner->null_value= 0;
+      my_decimal_round_if_needed(E_DEC_FATAL_ERROR, val1, (*a)->decimals, 0);
+      my_decimal_round_if_needed(E_DEC_FATAL_ERROR, val2, (*b)->decimals, 0);
       return my_decimal_cmp(val1, val2);
     }
   }
@@ -915,7 +917,9 @@ int Arg_comparator::compare_e_decimal()
   my_decimal *val2= (*b)->val_decimal(&decimal2);
   if ((*a)->null_value || (*b)->null_value)
     return MY_TEST((*a)->null_value && (*b)->null_value);
-  return MY_TEST(my_decimal_cmp(val1, val2) == 0);
+  my_decimal_round_if_needed(E_DEC_FATAL_ERROR, val1, (*a)->decimals, 0);
+  my_decimal_round_if_needed(E_DEC_FATAL_ERROR, val2, (*b)->decimals, 0);
+  return my_decimal_cmp(val1, val2) == 0;
 }
 
 
@@ -2312,7 +2316,7 @@ longlong Item_func_between::val_int()
 
 void Item_func_between::print(String *str, enum_query_type query_type)
 {
-  args[0]->print_parenthesised(str, query_type, precedence());
+  args[0]->print_parenthesised(str, query_type, higher_precedence());
   if (negated)
     str->append(STRING_WITH_LEN(" not"));
   str->append(STRING_WITH_LEN(" between "));
@@ -3375,15 +3379,15 @@ void Item_func_case::print(String *str, enum_query_type query_type)
   for (uint i= first_expr_num + 1 ; i < nwhens + first_expr_num + 1; i++)
   {
     str->append(STRING_WITH_LEN("when "));
-    args[i]->print_parenthesised(str, query_type, precedence());
+    args[i]->print(str, query_type);
     str->append(STRING_WITH_LEN(" then "));
-    args[i+nwhens]->print_parenthesised(str, query_type, precedence());
+    args[i+nwhens]->print(str, query_type);
     str->append(' ');
   }
   if (else_expr_num != -1)
   {
     str->append(STRING_WITH_LEN("else "));
-    args[else_expr_num]->print_parenthesised(str, query_type, precedence());
+    args[else_expr_num]->print(str, query_type);
     str->append(' ');
   }
   str->append(STRING_WITH_LEN("end"));
@@ -4153,8 +4157,11 @@ void Item_func_in::fix_after_pullout(st_select_lex *new_parent, Item **ref,
   eval_not_null_tables(NULL);
 }
 
-static int srtcmp_in(CHARSET_INFO *cs, const String *x,const String *y)
+static int srtcmp_in(const void *cs_, const void *x_, const void *y_)
 {
+  const CHARSET_INFO *cs= static_cast<const CHARSET_INFO *>(cs_);
+  const String *x= static_cast<const String *>(x_);
+  const String *y= static_cast<const String *>(y_);
   return cs->coll->strnncollsp(cs,
                                (uchar *) x->ptr(),x->length(),
                                (uchar *) y->ptr(),y->length());
@@ -5240,12 +5247,14 @@ void Item_func_like::print(String *str, enum_query_type query_type)
     str->append(STRING_WITH_LEN(" not "));
   str->append(func_name());
   str->append(' ');
-  args[1]->print_parenthesised(str, query_type, precedence());
   if (escape_used_in_parsing)
   {
+    args[1]->print_parenthesised(str, query_type, precedence());
     str->append(STRING_WITH_LEN(" escape "));
-    escape_item->print(str, query_type);
+    escape_item->print_parenthesised(str, query_type, higher_precedence());
   }
+  else
+    args[1]->print_parenthesised(str, query_type, higher_precedence());
 }
 
 

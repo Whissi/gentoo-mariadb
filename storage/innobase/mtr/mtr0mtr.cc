@@ -233,8 +233,8 @@ static void memo_slot_release(mtr_memo_slot_t *slot)
   case MTR_MEMO_PAGE_SX_FIX:
   case MTR_MEMO_PAGE_X_FIX:
     buf_block_t *block= reinterpret_cast<buf_block_t*>(slot->object);
-    buf_block_unfix(block);
     buf_page_release_latch(block, slot->type);
+    buf_block_unfix(block);
     break;
   }
   slot->object= NULL;
@@ -276,8 +276,8 @@ struct ReleaseLatches {
     case MTR_MEMO_PAGE_SX_FIX:
     case MTR_MEMO_PAGE_X_FIX:
       buf_block_t *block= reinterpret_cast<buf_block_t*>(slot->object);
-      buf_block_unfix(block);
       buf_page_release_latch(block, slot->type);
+      buf_block_unfix(block);
       break;
     }
     slot->object= NULL;
@@ -307,6 +307,24 @@ struct DebugCheck {
 	}
 };
 #endif
+
+/** Find buffer fix count of the given block acquired by the
+mini-transaction */
+struct FindBlock
+{
+  int32_t num_fix;
+  const buf_block_t *const block;
+
+  FindBlock(const buf_block_t *block_buf): num_fix(0), block(block_buf) {}
+
+  bool operator()(const mtr_memo_slot_t* slot)
+  {
+    if (slot->object == block)
+      ut_d(if (slot->type != MTR_MEMO_MODIFY))
+      num_fix++;
+    return true;
+  }
+};
 
 /** Release a resource acquired by the mini-transaction. */
 struct ReleaseBlocks {
@@ -802,6 +820,14 @@ mtr_t::release_free_extents(ulint n_reserved)
 
   ut_ad(memo_contains(get_memo(), space, MTR_MEMO_SPACE_X_LOCK));
   space->release_free_extents(n_reserved);
+}
+
+int32_t mtr_t::get_fix_count(buf_block_t *block)
+{
+  Iterate<FindBlock> iteration((FindBlock(block)));
+  if (m_memo.for_each_block(iteration))
+    return iteration.functor.num_fix;
+  return 0;
 }
 
 #ifdef UNIV_DEBUG

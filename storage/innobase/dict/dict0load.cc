@@ -2686,7 +2686,7 @@ static const char* dict_load_table_low(const table_name_t& name,
 	*table = dict_mem_table_create(
 		name.m_name, space_id, n_cols + n_v_col, n_v_col, flags, flags2);
 	(*table)->id = table_id;
-	(*table)->file_unreadable = false;
+	(*table)->file_unreadable = !!(flags2 & DICT_TF2_DISCARDED);
 
 	return(NULL);
 }
@@ -2739,7 +2739,8 @@ dict_get_and_save_data_dir_path(
 {
 	ut_ad(!dict_table_is_temporary(table));
 
-	if (!table->data_dir_path && table->space) {
+	if (!table->data_dir_path && table->space
+	    && !dict_table_is_discarded(table)) {
 		char*	path = fil_space_get_first_path(table->space);
 
 		if (!dict_mutex_own) {
