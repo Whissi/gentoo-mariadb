@@ -120,23 +120,26 @@ bool dict_col_t::same_encoding(uint16_t a, uint16_t b)
 {
   if (const CHARSET_INFO *acs= get_charset(a, MYF(MY_WME)))
     if (const CHARSET_INFO *bcs= get_charset(b, MYF(MY_WME)))
-      return Charset(acs).same_encoding(bcs);
+      return Charset(bcs).encoding_allows_reinterpret_as(acs);
   return false;
 }
 
-/**********************************************************************//**
-Creates a table memory object.
+/** Create a table memory object.
+@param name     table name
+@param space    tablespace
+@param n_cols   total number of columns (both virtual and non-virtual)
+@param n_v_cols number of virtual columns
+@param flags    table flags
+@param flags2   table flags2
 @return own: table object */
 dict_table_t*
 dict_mem_table_create(
-/*==================*/
-	const char*	name,	/*!< in: table name */
-	fil_space_t*	space,	/*!< in: tablespace */
-	ulint		n_cols,	/*!< in: total number of columns including
-				virtual and non-virtual columns */
-	ulint		n_v_cols,/*!< in: number of virtual columns */
-	ulint		flags,	/*!< in: table flags */
-	ulint		flags2)	/*!< in: table flags2 */
+	const char*	name,
+	fil_space_t*	space,
+	ulint		n_cols,
+	ulint		n_v_cols,
+	ulint		flags,
+	ulint		flags2)
 {
 	dict_table_t*	table;
 	mem_heap_t*	heap;
@@ -198,9 +201,6 @@ dict_mem_table_create(
 	new(&table->foreign_set) dict_foreign_set();
 	new(&table->referenced_set) dict_foreign_set();
 
-	rw_lock_create(dict_table_stats_key, &table->stats_latch,
-		       SYNC_INDEX_TREE);
-
 	return(table);
 }
 
@@ -244,8 +244,6 @@ dict_mem_table_free(
 	}
 
 	UT_DELETE(table->s_cols);
-
-	rw_lock_free(&table->stats_latch);
 
 	mem_heap_free(table->heap);
 }
@@ -425,7 +423,6 @@ dict_mem_table_add_v_col(
 
 	/* Initialize the index list for virtual columns */
 	ut_ad(v_col->v_indexes.empty());
-	v_col->n_v_indexes = 0;
 
 	return(v_col);
 }
@@ -1194,6 +1191,24 @@ operator<< (std::ostream& out, const dict_foreign_set& fk_set)
 	std::for_each(fk_set.begin(), fk_set.end(), dict_foreign_print(out));
 	out << "]" << std::endl;
 	return(out);
+}
+
+/** Check whether fulltext index gets affected by foreign
+key constraint. */
+bool dict_foreign_t::affects_fulltext() const
+{
+  if (foreign_table == referenced_table || !foreign_table->fts)
+    return false;
+
+  for (ulint i= 0; i < n_fields; i++)
+  {
+    const dict_col_t *col= dict_index_get_nth_col(foreign_index, i);
+    if (dict_table_is_fts_column(foreign_table->fts->indexes, col->ind,
+                                 col->is_virtual()) != ULINT_UNDEFINED)
+      return true;
+  }
+
+  return false;
 }
 
 /** Reconstruct the clustered index fields. */

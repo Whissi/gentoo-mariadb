@@ -230,7 +230,7 @@ class Dec_ptr_and_buffer: public Dec_ptr
 protected:
   my_decimal m_buffer;
 public:
-  int round_to(my_decimal *to, uint scale, decimal_round_mode mode)
+  int round_to(my_decimal *to, int scale, decimal_round_mode mode)
   {
     DBUG_ASSERT(m_ptr);
     return m_ptr->round_to(to, scale, mode);
@@ -238,6 +238,14 @@ public:
   int round_self(uint scale, decimal_round_mode mode)
   {
     return round_to(&m_buffer, scale, mode);
+  }
+  int round_self_if_needed(int scale, decimal_round_mode mode)
+  {
+    if (scale >= m_ptr->frac)
+      return E_DEC_OK;
+    int res= m_ptr->round_to(&m_buffer, scale, mode);
+    m_ptr= &m_buffer;
+    return res;
   }
   String *to_string_round(String *to, uint dec)
   {
@@ -1056,6 +1064,13 @@ public:
   }
   // End of constuctors
 
+  bool copy_valid_value_to_mysql_time(MYSQL_TIME *ltime) const
+  {
+    DBUG_ASSERT(is_valid_temporal());
+    *ltime= *this;
+    return false;
+  }
+
   longlong to_longlong() const
   {
     if (!is_valid_temporal())
@@ -1308,6 +1323,7 @@ class Schema;
 */
 class Time: public Temporal
 {
+  static uint binary_length_to_precision(uint length);
 public:
   enum datetime_to_time_mode_t
   {
@@ -1540,6 +1556,14 @@ public:
   */
   Time(int *warn, bool neg, ulonglong hour, uint minute, const Sec6 &second);
   Time() { time_type= MYSQL_TIMESTAMP_NONE; }
+  Time(const Native &native);
+  Time(THD *thd, const MYSQL_TIME *ltime, const Options opt)
+  {
+    *(static_cast<MYSQL_TIME*>(this))= *ltime;
+    DBUG_ASSERT(is_valid_temporal());
+    int warn= 0;
+    valid_MYSQL_TIME_to_valid_value(thd, &warn, opt);
+  }
   Time(Item *item)
    :Time(current_thd, item)
   { }
@@ -1695,6 +1719,7 @@ public:
     return !is_valid_time() ? 0 :
            Temporal::to_double(neg, TIME_to_ulonglong_time(this), second_part);
   }
+  bool to_native(Native *to, uint decimals) const;
   String *to_string(String *str, uint dec) const
   {
     if (!is_valid_time())
@@ -1711,6 +1736,11 @@ public:
   longlong to_packed() const
   {
     return is_valid_time() ? Temporal::to_packed() : 0;
+  }
+  longlong valid_time_to_packed() const
+  {
+    DBUG_ASSERT(is_valid_time_slow());
+    return Temporal::to_packed();
   }
   long fraction_remainder(uint dec) const
   {
@@ -1886,6 +1916,11 @@ public:
   {
     return ::check_date_with_warn(thd, this, flags, MYSQL_TIMESTAMP_ERROR);
   }
+  bool check_date_with_warn(THD *thd)
+  {
+    return ::check_date_with_warn(thd, this, Temporal::sql_mode_for_dates(thd),
+                                  MYSQL_TIMESTAMP_ERROR);
+  }
   static date_conv_mode_t comparison_flags_for_get_date()
   { return TIME_INVALID_DATES | TIME_FUZZY_DATES; }
 };
@@ -1954,10 +1989,36 @@ public:
     datetime_to_date(this);
     DBUG_ASSERT(is_valid_date_slow());
   }
+  explicit Date(const Temporal_hybrid *from)
+  {
+    from->copy_valid_value_to_mysql_time(this);
+    DBUG_ASSERT(is_valid_date_slow());
+  }
   bool is_valid_date() const
   {
     DBUG_ASSERT(is_valid_value_slow());
     return time_type == MYSQL_TIMESTAMP_DATE;
+  }
+  bool check_date(date_conv_mode_t flags, int *warnings) const
+  {
+    DBUG_ASSERT(is_valid_date_slow());
+    return ::check_date(this, (year || month || day),
+                        ulonglong(flags & TIME_MODE_FOR_XXX_TO_DATE),
+                        warnings);
+  }
+  bool check_date(THD *thd, int *warnings) const
+  {
+    return check_date(Temporal::sql_mode_for_dates(thd), warnings);
+  }
+  bool check_date(date_conv_mode_t flags) const
+  {
+    int dummy; /* unused */
+    return check_date(flags, &dummy);
+  }
+  bool check_date(THD *thd) const
+  {
+    int dummy;
+    return check_date(Temporal::sql_mode_for_dates(thd), &dummy);
   }
   const MYSQL_TIME *get_mysql_time() const
   {
@@ -2001,6 +2062,11 @@ public:
     return Temporal_with_date::yearweek(week_behaviour);
   }
 
+  longlong valid_date_to_packed() const
+  {
+    DBUG_ASSERT(is_valid_date_slow());
+    return Temporal::to_packed();
+  }
   longlong to_longlong() const
   {
     return is_valid_date() ? (longlong) TIME_to_ulonglong_date(this) : 0LL;
@@ -2187,6 +2253,16 @@ public:
   {
     round(thd, dec, time_round_mode_t(fuzzydate), warn);
   }
+  explicit Datetime(const Temporal_hybrid *from)
+  {
+    from->copy_valid_value_to_mysql_time(this);
+    DBUG_ASSERT(is_valid_datetime_slow());
+  }
+  explicit Datetime(const MYSQL_TIME *from)
+  {
+    *(static_cast<MYSQL_TIME*>(this))= *from;
+    DBUG_ASSERT(is_valid_datetime_slow());
+  }
 
   bool is_valid_datetime() const
   {
@@ -2208,6 +2284,10 @@ public:
   {
     int dummy; /* unused */
     return check_date(flags, &dummy);
+  }
+  bool check_date(THD *thd) const
+  {
+    return check_date(Temporal::sql_mode_for_dates(thd));
   }
   bool hhmmssff_is_zero() const
   {
@@ -2316,6 +2396,11 @@ public:
   longlong to_packed() const
   {
     return is_valid_datetime() ? Temporal::to_packed() : 0;
+  }
+  longlong valid_datetime_to_packed() const
+  {
+    DBUG_ASSERT(is_valid_datetime_slow());
+    return Temporal::to_packed();
   }
   long fraction_remainder(uint dec) const
   {
@@ -3570,6 +3655,8 @@ public:
                           const Type_std_attributes *item,
                           SORT_FIELD_ATTR *attr) const= 0;
 
+  virtual bool is_packable() const { return false; }
+
   virtual uint32 max_display_length(const Item *item) const= 0;
   virtual uint32 Item_decimal_notation_int_digits(const Item *item) const { return 0; }
   virtual uint32 calc_pack_length(uint32 length) const= 0;
@@ -4711,7 +4798,11 @@ public:
   void sortlength(THD *thd,
                   const Type_std_attributes *item,
                   SORT_FIELD_ATTR *attr) const;
+
+  bool is_packable()const { return true; }
+
   bool union_element_finalize(const Item * item) const;
+
   bool Column_definition_prepare_stage1(THD *thd,
                                         MEM_ROOT *mem_root,
                                         Column_definition *c,
@@ -5324,6 +5415,12 @@ public:
   {
     return MYSQL_TIMESTAMP_TIME;
   }
+  bool is_val_native_ready() const { return true; }
+  const Type_handler *type_handler_for_native_format() const;
+  int cmp_native(const Native &a, const Native &b) const;
+  bool Item_val_native_with_conversion(THD *thd, Item *, Native *to) const;
+  bool Item_val_native_with_conversion_result(THD *thd, Item *, Native *to) const;
+  bool Item_param_val_native(THD *thd, Item_param *item, Native *to) const;
   Item_literal *create_literal_item(THD *thd, const char *str, size_t length,
                                     CHARSET_INFO *cs, bool send_error) const;
   Item *create_typecast_item(THD *thd, Item *item,
@@ -5511,6 +5608,8 @@ public:
                                        Type_handler_hybrid_field_type *,
                                        Type_all_attributes *atrr,
                                        Item **items, uint nitems) const;
+  bool Item_func_min_max_fix_attributes(THD *thd, Item_func_min_max *func,
+                                        Item **items, uint nitems) const;
   void Item_param_set_param_func(Item_param *param,
                                  uchar **pos, ulong len) const;
 };

@@ -1978,7 +1978,7 @@ int spider_parse_connect_info(
 ) {
   int error_num = 0;
   char *connect_string = NULL;
-  char *sprit_ptr[2];
+  char *sprit_ptr;
   char *tmp_ptr, *tmp_ptr2, *start_ptr;
   int roop_count;
   int title_length;
@@ -2171,23 +2171,17 @@ int spider_parse_connect_info(
         break;
     }
 
-    sprit_ptr[0] = connect_string;
+    sprit_ptr = connect_string;
     connect_string_parse.init(connect_string, ER_SPIDER_INVALID_CONNECT_INFO_NUM);
-    while (sprit_ptr[0])
+    while (sprit_ptr)
     {
-      if ((sprit_ptr[1] = strchr(sprit_ptr[0], ',')))
-      {
-        *sprit_ptr[1] = '\0';
-        sprit_ptr[1]++;
-      }
-      tmp_ptr = sprit_ptr[0];
-      sprit_ptr[0] = sprit_ptr[1];
+      tmp_ptr = sprit_ptr;
       while (*tmp_ptr == ' ' || *tmp_ptr == '\r' ||
         *tmp_ptr == '\n' || *tmp_ptr == '\t')
         tmp_ptr++;
 
       if (*tmp_ptr == '\0')
-        continue;
+        break;
 
       title_length = 0;
       start_ptr = tmp_ptr;
@@ -2200,6 +2194,11 @@ int spider_parse_connect_info(
         start_ptr++;
       }
       connect_string_parse.set_param_title(tmp_ptr, tmp_ptr + title_length);
+      if ((error_num = connect_string_parse.get_next_parameter_head(
+        start_ptr, &sprit_ptr)))
+      {
+        goto error;
+      }
 
       switch (title_length)
       {
@@ -6384,13 +6383,18 @@ int spider_open_all_tables(
     }
     conn->error_mode &= spider_param_error_read_mode(thd, 0);
     conn->error_mode &= spider_param_error_write_mode(thd, 0);
+    pthread_mutex_assert_not_owner(&conn->mta_conn_mutex);
     pthread_mutex_lock(&conn->mta_conn_mutex);
     SPIDER_SET_FILE_POS(&conn->mta_conn_mutex_file_pos);
     conn->need_mon = &mon_val;
+    DBUG_ASSERT(!conn->mta_conn_mutex_lock_already);
+    DBUG_ASSERT(!conn->mta_conn_mutex_unlock_later);
     conn->mta_conn_mutex_lock_already = TRUE;
     conn->mta_conn_mutex_unlock_later = TRUE;
     if ((error_num = spider_db_before_query(conn, &mon_val)))
     {
+      DBUG_ASSERT(conn->mta_conn_mutex_lock_already);
+      DBUG_ASSERT(conn->mta_conn_mutex_unlock_later);
       conn->mta_conn_mutex_lock_already = FALSE;
       conn->mta_conn_mutex_unlock_later = FALSE;
       SPIDER_CLEAR_FILE_POS(&conn->mta_conn_mutex_file_pos);
@@ -6403,6 +6407,8 @@ int spider_open_all_tables(
       free_root(&mem_root, MYF(0));
       DBUG_RETURN(error_num);
     }
+    DBUG_ASSERT(conn->mta_conn_mutex_lock_already);
+    DBUG_ASSERT(conn->mta_conn_mutex_unlock_later);
     conn->mta_conn_mutex_lock_already = FALSE;
     conn->mta_conn_mutex_unlock_later = FALSE;
     SPIDER_CLEAR_FILE_POS(&conn->mta_conn_mutex_file_pos);

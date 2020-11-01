@@ -2280,8 +2280,17 @@ int Lex_input_stream::scan_ident_delimited(THD *thd,
   uchar c;
   DBUG_ASSERT(m_ptr == m_tok_start + 1);
 
-  while ((c= yyGet()))
+  for ( ; ; )
   {
+    if (!(c= yyGet()))
+    {
+      /*
+        End-of-query or straight 0x00 inside a delimited identifier.
+        Return the quote character, to have the parser fail on syntax error.
+      */
+      m_ptr= (char *) m_tok_start + 1;
+      return quote_char;
+    }
     int var_length= my_charlen(cs, get_ptr() - 1, get_end_of_query());
     if (var_length == 1)
     {
@@ -2419,6 +2428,7 @@ void st_select_lex::init_query()
   changed_elements= 0;
   first_natural_join_processing= 1;
   first_cond_optimization= 1;
+  is_service_select= 0;
   parsing_place= NO_MATTER;
   save_parsing_place= NO_MATTER;
   exclude_from_table_unique_test= no_wrap_view_item= FALSE;
@@ -3385,21 +3395,21 @@ bool LEX::can_not_use_merged()
   }
 }
 
-/*
-  Detect that we need only table structure of derived table/view
+/**
+  Detect that we need only table structure of derived table/view.
 
-  SYNOPSIS
-    only_view_structure()
+  Also used by I_S tables (@see create_schema_table) to detect that
+  they need a full table structure and cannot optimize unused columns away
 
-  RETURN
-    TRUE yes, we need only structure
-    FALSE no, we need data
+  @retval TRUE yes, we need only structure
+  @retval FALSE no, we need data
 */
 
 bool LEX::only_view_structure()
 {
   switch (sql_command) {
   case SQLCOM_SHOW_CREATE:
+  case SQLCOM_CHECKSUM:
   case SQLCOM_SHOW_TABLES:
   case SQLCOM_SHOW_FIELDS:
   case SQLCOM_REVOKE_ALL:
@@ -3407,6 +3417,8 @@ bool LEX::only_view_structure()
   case SQLCOM_GRANT:
   case SQLCOM_CREATE_VIEW:
     return TRUE;
+  case SQLCOM_CREATE_TABLE:
+    return create_info.like();
   default:
     return FALSE;
   }
@@ -7605,7 +7617,7 @@ Item *LEX::create_item_ident_sp(THD *thd, Lex_ident_sys_st *name,
       return new (thd->mem_root) Item_func_sqlerrm(thd);
   }
 
-  if (!select_stack_head() &&
+  if (fields_are_impossible() &&
       (current_select->parsing_place != FOR_LOOP_BOUND ||
        spcont->find_cursor(name, &unused_off, false) == NULL))
   {
@@ -8931,11 +8943,12 @@ void st_select_lex::add_statistics(SELECT_LEX_UNIT *unit)
 }
 
 
-bool LEX::main_select_push()
+bool LEX::main_select_push(bool service)
 {
   DBUG_ENTER("LEX::main_select_push");
   current_select_number= 1;
   builtin_select.select_number= 1;
+  builtin_select.is_service_select= service;
   if (push_select(&builtin_select))
     DBUG_RETURN(TRUE);
   DBUG_RETURN(FALSE);

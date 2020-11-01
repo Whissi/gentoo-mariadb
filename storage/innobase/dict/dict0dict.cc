@@ -277,7 +277,7 @@ dict_table_try_drop_aborted(
 	}
 
 	row_mysql_unlock_data_dictionary(trx);
-	trx_free(trx);
+	trx->free();
 }
 
 /**********************************************************************//**
@@ -1768,7 +1768,7 @@ void dict_sys_t::remove(dict_table_t* table, bool lru, bool keep)
 		row_merge_drop_indexes_dict(trx, table->id);
 		trx_commit_for_mysql(trx);
 		trx->dict_operation_lock_mode = 0;
-		trx_free(trx);
+		trx->free();
 	}
 
 	/* Free virtual column template if any */
@@ -1785,6 +1785,12 @@ void dict_sys_t::remove(dict_table_t* table, bool lru, bool keep)
 
 #ifdef BTR_CUR_HASH_ADAPT
 	if (UNIV_UNLIKELY(UT_LIST_GET_LEN(table->freed_indexes) != 0)) {
+		if (table->fts) {
+			fts_optimize_remove_table(table);
+			fts_free(table);
+			table->fts = NULL;
+		}
+
 		table->vc_templ = NULL;
 		table->id = 0;
 		return;
@@ -2146,7 +2152,6 @@ dict_index_add_col(
 	if (col->is_virtual()) {
 		dict_v_col_t*	v_col = reinterpret_cast<dict_v_col_t*>(col);
 		/* Register the index with the virtual column index list */
-		v_col->n_v_indexes++;
 		v_col->v_indexes.push_front(dict_v_idx_t(index, index->n_def));
 		col_name = dict_table_get_v_col_name_mysql(
 			table, dict_col_get_no(col));
@@ -6047,7 +6052,11 @@ dict_foreign_qualify_index(
 		return(false);
 	}
 
-	if (index->type & (DICT_SPATIAL | DICT_FTS)) {
+	if (index->type & (DICT_SPATIAL | DICT_FTS | DICT_CORRUPT)) {
+		return false;
+	}
+
+	if (index->online_status >= ONLINE_INDEX_ABORTED) {
 		return false;
 	}
 

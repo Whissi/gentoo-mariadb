@@ -1661,6 +1661,16 @@ sub command_line_setup {
     $opt_shutdown_timeout= 24 * 60;
     # One day for PID file creation (this is given in seconds not minutes)
     $opt_start_timeout= 24 * 60 * 60;
+    if ($opt_rr && open(my $fh, '<', '/proc/sys/kernel/perf_event_paranoid'))
+    {
+      my $perf_event_paranoid= <$fh>;
+      close $fh;
+      chomp $perf_event_paranoid;
+      if ($perf_event_paranoid == 0)
+      {
+        mtr_error("rr requires kernel.perf_event_paranoid set to 1");
+      }
+    }
   }
 
   # --------------------------------------------------------------------------
@@ -2332,7 +2342,8 @@ sub environment_setup {
   $ENV{'MYSQL_EMBEDDED'}=           $exe_mysql_embedded;
   if(IS_WINDOWS)
   {
-     $ENV{'MYSQL_INSTALL_DB_EXE'}=  mtr_exe_exists("$bindir/sql$opt_vs_config/mysql_install_db");
+     $ENV{'MYSQL_INSTALL_DB_EXE'}=  mtr_exe_exists("$bindir/sql$opt_vs_config/mysql_install_db",
+       "$bindir/bin/mysql_install_db");
   }
 
   my $client_config_exe=
@@ -6418,7 +6429,7 @@ Options for debugging the product
   debug-server          Use debug version of server, but without turning on
                         tracing
   debugger=NAME         Start mysqld in the selected debugger
-  gdb                   Start the mysqld(s) in gdb
+  gdb[=gdb_arguments]   Start the mysqld(s) in gdb
   manual-debug          Let user manually start mysqld in debugger, before
                         running test(s)
   manual-gdb            Let user manually start mysqld in gdb, before running

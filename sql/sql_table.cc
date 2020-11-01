@@ -3346,7 +3346,7 @@ mysql_add_invisible_index(THD *thd, List<Key> *key_list,
   Key *key= NULL;
   key= new (thd->mem_root) Key(type, &null_clex_str, HA_KEY_ALG_UNDEF,
          false, DDL_options(DDL_options::OPT_NONE));
-  key->columns.push_back(new(thd->mem_root) Key_part_spec(field_name, 0),
+  key->columns.push_back(new(thd->mem_root) Key_part_spec(field_name, 0, true),
           thd->mem_root);
   key_list->push_back(key, thd->mem_root);
   return key;
@@ -3863,7 +3863,8 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
       /*
          Either field is not present or field visibility is > INVISIBLE_USER
       */
-      if (!sql_field)
+      if (!sql_field || (sql_field->invisible > INVISIBLE_USER &&
+                         !column->generated))
       {
 	my_error(ER_KEY_COLUMN_DOES_NOT_EXITS, MYF(0), column->field_name.str);
 	DBUG_RETURN(TRUE);
@@ -4577,9 +4578,10 @@ static bool vers_prepare_keys(THD *thd, HA_CREATE_INFO *create_info,
     if (key_part)
       continue; // Key already contains Sys_start or Sys_end
 
-    Key_part_spec *key_part_sys_end_col=
-        new (thd->mem_root) Key_part_spec(&create_info->vers_info.as_row.end, 0);
-    key->columns.push_back(key_part_sys_end_col);
+    Key_part_spec *row_end=
+        new (thd->mem_root) Key_part_spec(&create_info->vers_info.as_row.end, 0,
+                                          true);
+    key->columns.push_back(row_end);
   }
 
   return false;
@@ -8501,8 +8503,8 @@ mysql_prepare_alter_table(THD *thd, TABLE *table,
 	  key_part_length= 0;			// Use whole field
       }
       key_part_length /= kfield->charset()->mbmaxlen;
-      key_parts.push_back(new (thd->mem_root) Key_part_spec(
-                            &cfield->field_name, key_part_length),
+      key_parts.push_back(new (thd->mem_root) Key_part_spec(&cfield->field_name,
+                                                            key_part_length, true),
                           thd->mem_root);
     }
     if (table->s->tmp_table == NO_TMP_TABLE)
@@ -10614,6 +10616,7 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
   bool make_versioned= !from->versioned() && to->versioned();
   bool make_unversioned= from->versioned() && !to->versioned();
   bool keep_versioned= from->versioned() && to->versioned();
+  bool bulk_insert_started= 0;
   Field *to_row_start= NULL, *to_row_end= NULL, *from_row_end= NULL;
   MYSQL_TIME query_start;
   DBUG_ENTER("copy_data_between_tables");
@@ -10652,6 +10655,7 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
   to->file->extra(HA_EXTRA_PREPARE_FOR_ALTER_TABLE);
   to->file->ha_start_bulk_insert(from->file->stats.records,
                                  ignore ? 0 : HA_CREATE_UNIQUE_INDEX_BY_SORT);
+  bulk_insert_started= 1;
   List_iterator<Create_field> it(create);
   Create_field *def;
   copy_end=copy;
@@ -10914,6 +10918,7 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
       to->file->print_error(my_errno,MYF(0));
     error= 1;
   }
+  bulk_insert_started= 0;
   if (!ignore)
     to->file->extra(HA_EXTRA_END_ALTER_COPY);
 
@@ -10927,7 +10932,10 @@ copy_data_between_tables(THD *thd, TABLE *from, TABLE *to,
     error= 1;
 
  err:
-  /* Free resources */
+  if (bulk_insert_started)
+    (void) to->file->ha_end_bulk_insert();
+
+/* Free resources */
   if (init_read_record_done)
     end_read_record(&info);
   delete [] copy;

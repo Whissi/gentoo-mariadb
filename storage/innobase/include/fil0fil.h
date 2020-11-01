@@ -102,15 +102,6 @@ struct fil_space_t
 	/** Log sequence number of the latest MLOG_INDEX_LOAD record
 	that was found while parsing the redo log */
 	lsn_t		enable_lsn;
-	/** set when an .ibd file is about to be deleted,
-	or an undo tablespace is about to be truncated.
-	When this is set following new ops are not allowed:
-	* read IO request
-	* ibuf merge
-	* file flush
-	Note that we can still possibly have new write operations
-	because we don't check this flag when doing flush batches. */
-	bool		stop_new_ops;
 	/** whether undo tablespace truncation is in progress */
 	bool		is_being_truncated;
 #ifdef UNIV_DEBUG
@@ -142,14 +133,22 @@ struct fil_space_t
 	ulint		n_pending_flushes; /*!< this is positive when flushing
 				the tablespace to disk; dropping of the
 				tablespace is forbidden if this is positive */
-	/** Number of pending buffer pool operations accessing the tablespace
-	without holding a table lock or dict_sys.latch S-latch
-	that would prevent the table (and tablespace) from being
-	dropped. An example is change buffer merge.
-	The tablespace cannot be dropped while this is nonzero,
-	or while fil_node_t::n_pending is nonzero.
-	Protected by fil_system.mutex and std::atomic. */
-	std::atomic<ulint>		n_pending_ops;
+private:
+  /** Number of pending buffer pool operations accessing the
+  tablespace without holding a table lock or dict_operation_lock
+  S-latch that would prevent the table (and tablespace) from being
+  dropped. An example is change buffer merge.
+
+  The tablespace cannot be dropped while this is nonzero, or while
+  fil_node_t::n_pending is nonzero.
+
+  The most significant bit contains the STOP_NEW_OPS flag. */
+  Atomic_relaxed<size_t> n_pending_ops;
+
+  /** Flag in n_pending_ops that indicates that the tablespace is being
+  deleted, and no further operations should be performed */
+  static const size_t STOP_NEW_OPS= ~(~size_t(0) >> 1);
+public:
 	/** Number of pending block read or write operations
 	(when a write is imminent or a read has recently completed).
 	The tablespace object cannot be freed while this is nonzero,
@@ -182,9 +181,6 @@ struct fil_space_t
 	bool		punch_hole;
 
 	ulint		magic_n;/*!< FIL_SPACE_MAGIC_N */
-
-	/** @return whether the tablespace is about to be dropped */
-	bool is_stopping() const { return stop_new_ops;	}
 
   /** Clamp a page number for batched I/O, such as read-ahead.
   @param offset   page number limit
@@ -270,26 +266,52 @@ struct fil_space_t
 	/** Close each file. Only invoked on fil_system.temp_space. */
 	void close();
 
-	/** Acquire a tablespace reference. */
-	void acquire() { n_pending_ops++; }
-	/** Release a tablespace reference. */
-	void release() { ut_ad(referenced()); n_pending_ops--; }
-	/** @return whether references are being held */
-	bool referenced() const { return n_pending_ops; }
+  /** @return whether the tablespace is about to be dropped */
+  bool is_stopping() const { return n_pending_ops & STOP_NEW_OPS; }
 
-	/** Acquire a tablespace reference for I/O. */
-	void acquire_for_io() { n_pending_ios++; }
-	/** Release a tablespace reference for I/O. */
-	void release_for_io() { ut_ad(pending_io()); n_pending_ios--; }
-	/** @return whether I/O is pending */
-	bool pending_io() const { return n_pending_ios; }
+  /** @return number of references being held */
+  size_t referenced() const { return n_pending_ops & ~STOP_NEW_OPS; }
+
+  /** Note that operations on the tablespace must stop or can resume */
+  void set_stopping(bool stopping)
+  {
+    ut_d(auto n=) n_pending_ops.fetch_xor(STOP_NEW_OPS);
+    ut_ad(!(n & STOP_NEW_OPS) == stopping);
+  }
+
+  MY_ATTRIBUTE((warn_unused_result))
+  /** @return whether a tablespace reference was successfully acquired */
+  bool acquire()
+  {
+    size_t n= 0;
+    while (!n_pending_ops.compare_exchange_strong(n, n + 1,
+                                                  std::memory_order_acquire,
+                                                  std::memory_order_relaxed))
+      if (UNIV_UNLIKELY(n & STOP_NEW_OPS))
+        return false;
+    return true;
+  }
+  /** Release a tablespace reference.
+  @return whether this was the last reference */
+  bool release()
+  {
+    auto n= n_pending_ops.fetch_sub(1);
+    ut_ad(n & ~STOP_NEW_OPS);
+    return (n & ~STOP_NEW_OPS) == 1;
+  }
+  /** Acquire a tablespace reference for I/O. */
+  void acquire_for_io() { n_pending_ios++; }
+  /** Release a tablespace reference for I/O. */
+  void release_for_io() { ut_d(auto n=) n_pending_ios--; ut_ad(n); }
+  /** @return whether I/O is pending */
+  bool pending_io() const { return n_pending_ios; }
 #endif /* !UNIV_INNOCHECKSUM */
 	/** FSP_SPACE_FLAGS and FSP_FLAGS_MEM_ flags;
 	check fsp0types.h to more info about flags. */
 	ulint		flags;
 
 	/** Determine if full_crc32 is used for a data file
-	@param[in]	flags	tablespace flags (FSP_FLAGS)
+	@param[in]	flags	tablespace flags (FSP_SPACE_FLAGS)
 	@return whether the full_crc32 algorithm is active */
 	static bool full_crc32(ulint flags) {
 		return flags & FSP_FLAGS_FCRC32_MASK_MARKER;
@@ -408,23 +430,23 @@ struct fil_space_t
 	static bool is_flags_full_crc32_equal(ulint flags, ulint expected)
 	{
 		ut_ad(full_crc32(flags));
-		ulint page_ssize = FSP_FLAGS_FCRC32_GET_PAGE_SSIZE(flags);
+		ulint fcrc32_psize = FSP_FLAGS_FCRC32_GET_PAGE_SSIZE(flags);
 
 		if (full_crc32(expected)) {
 			/* The data file may have been created with a
 			different innodb_compression_algorithm. But
 			we only support one innodb_page_size for all files. */
-			return page_ssize
-				== FSP_FLAGS_FCRC32_GET_PAGE_SSIZE(expected);
+			return fcrc32_psize
+			       == FSP_FLAGS_FCRC32_GET_PAGE_SSIZE(expected);
 		}
 
-		ulint space_page_ssize = FSP_FLAGS_GET_PAGE_SSIZE(expected);
+		ulint non_fcrc32_psize = FSP_FLAGS_GET_PAGE_SSIZE(expected);
 
-		if (page_ssize == 5) {
-			if (space_page_ssize) {
+		if (!non_fcrc32_psize) {
+			if (fcrc32_psize != 5) {
 				return false;
 			}
-		} else if (space_page_ssize != page_ssize) {
+		} else if (fcrc32_psize != non_fcrc32_psize) {
 			return false;
 		}
 
@@ -442,15 +464,15 @@ struct fil_space_t
 			return false;
 		}
 
-		ulint page_ssize = FSP_FLAGS_GET_PAGE_SSIZE(flags);
-		ulint space_page_ssize = FSP_FLAGS_FCRC32_GET_PAGE_SSIZE(
+		ulint non_fcrc32_psize = FSP_FLAGS_GET_PAGE_SSIZE(flags);
+		ulint fcrc32_psize = FSP_FLAGS_FCRC32_GET_PAGE_SSIZE(
 			expected);
 
-		if (page_ssize) {
-			if (space_page_ssize != 5) {
+		if (!non_fcrc32_psize) {
+			if (fcrc32_psize != 5) {
 				return false;
 			}
-		} else if (space_page_ssize != page_ssize) {
+		} else if (fcrc32_psize != non_fcrc32_psize) {
 			return false;
 		}
 
@@ -980,24 +1002,15 @@ public:
 	@retval	NULL	if the tablespace does not exist or cannot be read */
 	fil_space_t* read_page0(ulint id);
 
-	/** Return the next fil_space_t from key rotation list.
-	Once started, the caller must keep calling this until it returns NULL.
-	fil_space_acquire() and fil_space_t::release() are invoked here, which
-	blocks a concurrent operation from dropping the tablespace.
-	@param[in]      prev_space      Previous tablespace or NULL to start
-					from beginning of fil_system->rotation
-					list
-	@param[in]      recheck         recheck of the tablespace is needed or
-					still encryption thread does write page0
-					for it
-	@param[in]	key_version	key version of the key state thread
-	If NULL, use the first fil_space_t on fil_system->space_list.
-	@return pointer to the next fil_space_t.
-	@retval NULL if this was the last */
-	fil_space_t* keyrotate_next(
-		fil_space_t*	prev_space,
-		bool		remove,
-		uint		key_version);
+  /** Return the next tablespace from rotation_list.
+  @param space   previous tablespace (NULL to start from the start)
+  @param recheck whether the removal condition needs to be rechecked after
+  the encryption parameters were changed
+  @param encrypt expected state of innodb_encrypt_tables
+  @return the next tablespace to process (n_pending_ops incremented)
+  @retval NULL if this was the last */
+  inline fil_space_t* keyrotate_next(fil_space_t *space, bool recheck,
+                                     bool encrypt);
 };
 
 /** The tablespace memory cache. */
@@ -1047,11 +1060,12 @@ fil_space_free(
 	bool		x_latched);
 
 /** Set the recovered size of a tablespace in pages.
-@param id	tablespace ID
-@param size	recovered size in pages */
+@param	id	tablespace ID
+@param	size	recovered size in pages
+@param	flags	tablespace flags */
 UNIV_INTERN
-void
-fil_space_set_recv_size(ulint id, ulint size);
+void fil_space_set_recv_size_and_flags(ulint id, ulint size, uint32_t flags);
+
 /*******************************************************************//**
 Returns the size of the space in pages. The tablespace must be cached in the
 memory cache.
@@ -1151,33 +1165,6 @@ when it could be dropped concurrently.
 @retval	NULL if missing */
 fil_space_t*
 fil_space_acquire_for_io(ulint id);
-
-/** Return the next fil_space_t.
-Once started, the caller must keep calling this until it returns NULL.
-fil_space_acquire() and fil_space_t::release() are invoked here which
-blocks a concurrent operation from dropping the tablespace.
-@param[in,out]	prev_space	Pointer to the previous fil_space_t.
-If NULL, use the first fil_space_t on fil_system.space_list.
-@return pointer to the next fil_space_t.
-@retval NULL if this was the last  */
-fil_space_t*
-fil_space_next(
-	fil_space_t*	prev_space)
-	MY_ATTRIBUTE((warn_unused_result));
-
-/** Return the next fil_space_t from key rotation list.
-Once started, the caller must keep calling this until it returns NULL.
-fil_space_acquire() and fil_space_t::release() are invoked here which
-blocks a concurrent operation from dropping the tablespace.
-@param[in,out]	prev_space	Pointer to the previous fil_space_t.
-If NULL, use the first fil_space_t on fil_system.space_list.
-@param[in]	remove		Whether to remove the previous tablespace from
-				the rotation list
-@return pointer to the next fil_space_t.
-@retval NULL if this was the last*/
-fil_space_t*
-fil_space_keyrotate_next(fil_space_t* prev_space, bool remove)
-	MY_ATTRIBUTE((warn_unused_result));
 
 /** Replay a file rename operation if possible.
 @param[in]	space_id	tablespace identifier

@@ -598,6 +598,10 @@ public:
   double val_real() { return Time(this).to_double(); }
   String *val_str(String *to) { return Time(this).to_string(to, decimals); }
   my_decimal *val_decimal(my_decimal *to) { return Time(this).to_decimal(to); }
+  bool val_native(THD *thd, Native *to)
+  {
+    return Time(thd, this).to_native(to, decimals);
+  }
 };
 
 
@@ -944,7 +948,7 @@ public:
   bool fix_length_and_dec();
   bool eq(const Item *item, bool binary_cmp) const;
   void print(String *str, enum_query_type query_type);
-  enum precedence precedence() const { return ADDINTERVAL_PRECEDENCE; }
+  enum precedence precedence() const { return INTERVAL_PRECEDENCE; }
   bool need_parentheses_in_default() { return true; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_date_add_interval>(thd, this); }

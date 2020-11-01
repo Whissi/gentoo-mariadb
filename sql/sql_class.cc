@@ -1271,6 +1271,7 @@ void THD::init()
   first_successful_insert_id_in_prev_stmt_for_binlog= 0;
   first_successful_insert_id_in_cur_stmt= 0;
   current_backup_stage= BACKUP_FINISHED;
+  backup_commit_lock= 0;
 #ifdef WITH_WSREP
   wsrep_last_query_id= 0;
   wsrep_xid.null();
@@ -1383,8 +1384,9 @@ void THD::init_for_queries()
   set_time(); 
   /*
     We don't need to call ha_enable_transaction() as we can't have
-    any active transactions that has to be commited
+    any active transactions that has to be committed
   */
+  DBUG_ASSERT(transaction.is_empty());
   transaction.on= TRUE;
 
   reset_root_defaults(mem_root, variables.query_alloc_block_size,
@@ -1640,6 +1642,7 @@ void THD::reset_for_reuse()
   abort_on_warning= 0;
   free_connection_done= 0;
   m_command= COM_CONNECT;
+  transaction.on= 1;
 #if defined(ENABLED_PROFILING)
   profiling.reset();
 #endif
@@ -2566,7 +2569,7 @@ void THD::give_protection_error()
     my_error(ER_BACKUP_LOCK_IS_ACTIVE, MYF(0));
   else
   {
-    DBUG_ASSERT(global_read_lock.is_acquired());
+    DBUG_ASSERT(global_read_lock.is_acquired() || mdl_backup_lock);
     my_error(ER_CANT_UPDATE_WITH_READLOCK, MYF(0));
   }
 }
@@ -7385,16 +7388,33 @@ wait_for_commit::register_wait_for_prior_commit(wait_for_commit *waitee)
 }
 
 
-/*
-  Wait for commit of another transaction to complete, as already registered
+/**
+  Waits for commit of another transaction to complete, as already registered
   with register_wait_for_prior_commit(). If the commit already completed,
   returns immediately.
+
+  If thd->backup_commit_lock is set, release it while waiting for other threads
 */
+
 int
 wait_for_commit::wait_for_prior_commit2(THD *thd)
 {
   PSI_stage_info old_stage;
   wait_for_commit *loc_waitee;
+  bool backup_lock_released= 0;
+
+  /*
+    Release MDL_BACKUP_COMMIT LOCK while waiting for other threads to commit
+    This is needed to avoid deadlock between the other threads (which not
+    yet have the MDL_BACKUP_COMMIT_LOCK) and any threads using
+    BACKUP LOCK BLOCK_COMMIT.
+  */
+  if (thd->backup_commit_lock && thd->backup_commit_lock->ticket)
+  {
+    backup_lock_released= 1;
+    thd->mdl_context.release_lock(thd->backup_commit_lock->ticket);
+    thd->backup_commit_lock->ticket= 0;
+  }
 
   mysql_mutex_lock(&LOCK_wait_commit);
   DEBUG_SYNC(thd, "wait_for_prior_commit_waiting");
@@ -7444,10 +7464,16 @@ wait_for_commit::wait_for_prior_commit2(THD *thd)
     use within enter_cond/exit_cond.
   */
   DEBUG_SYNC(thd, "wait_for_prior_commit_killed");
+  if (backup_lock_released)
+    thd->mdl_context.acquire_lock(thd->backup_commit_lock,
+                                  thd->variables.lock_wait_timeout);
   return wakeup_error;
 
 end:
   thd->EXIT_COND(&old_stage);
+  if (backup_lock_released)
+    thd->mdl_context.acquire_lock(thd->backup_commit_lock,
+                                  thd->variables.lock_wait_timeout);
   return wakeup_error;
 }
 

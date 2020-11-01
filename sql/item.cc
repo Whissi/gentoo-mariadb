@@ -2011,6 +2011,11 @@ bool Item_name_const::get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydat
   return rc;
 }
 
+bool Item_name_const::val_native(THD *thd, Native *to)
+{
+  return val_native_from_item(thd, value_item, to);
+}
+
 bool Item_name_const::is_null()
 {
   return value_item->is_null();
@@ -2518,8 +2523,6 @@ bool Type_std_attributes::agg_item_set_converter(const DTCollation &coll,
     Item* conv= (*arg)->safe_charset_converter(thd, coll.collation);
     if (conv == *arg)
       continue;
-    if (!conv && ((*arg)->collation.repertoire == MY_REPERTOIRE_ASCII))
-      conv= new (thd->mem_root) Item_func_conv_charset(thd, *arg, coll.collation, 1);
 
     if (!conv)
     {
@@ -3238,6 +3241,24 @@ bool Item_field::val_native(THD *thd, Native *to)
 bool Item_field::val_native_result(THD *thd, Native *to)
 {
   return val_native_from_field(result_field, to);
+}
+
+
+longlong Item_field::val_datetime_packed(THD *thd)
+{
+  DBUG_ASSERT(fixed == 1);
+  if ((null_value= field->is_null()))
+    return 0;
+  return field->val_datetime_packed(thd);
+}
+
+
+longlong Item_field::val_time_packed(THD *thd)
+{
+  DBUG_ASSERT(fixed == 1);
+  if ((null_value= field->is_null()))
+    return 0;
+  return field->val_time_packed(thd);
 }
 
 
@@ -6975,7 +6996,7 @@ void Item_date_literal::print(String *str, enum_query_type query_type)
 {
   str->append("DATE'");
   char buf[MAX_DATE_STRING_REP_LENGTH];
-  my_date_to_str(&cached_time, buf);
+  my_date_to_str(cached_time.get_mysql_time(), buf);
   str->append(buf);
   str->append('\'');
 }
@@ -6990,7 +7011,7 @@ Item *Item_date_literal::clone_item(THD *thd)
 bool Item_date_literal::get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate)
 {
   fuzzydate |= sql_mode_for_dates(thd);
-  *ltime= cached_time;
+  cached_time.copy_to_mysql_time(ltime);
   return (null_value= check_date_with_warn(thd, ltime, fuzzydate,
                                            MYSQL_TIMESTAMP_ERROR));
 }
@@ -7000,7 +7021,7 @@ void Item_datetime_literal::print(String *str, enum_query_type query_type)
 {
   str->append("TIMESTAMP'");
   char buf[MAX_DATE_STRING_REP_LENGTH];
-  my_datetime_to_str(&cached_time, buf, decimals);
+  my_datetime_to_str(cached_time.get_mysql_time(), buf, decimals);
   str->append(buf);
   str->append('\'');
 }
@@ -7015,7 +7036,7 @@ Item *Item_datetime_literal::clone_item(THD *thd)
 bool Item_datetime_literal::get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate)
 {
   fuzzydate |= sql_mode_for_dates(thd);
-  *ltime= cached_time;
+  cached_time.copy_to_mysql_time(ltime);
   return (null_value= check_date_with_warn(thd, ltime, fuzzydate,
                                            MYSQL_TIMESTAMP_ERROR));
 }
@@ -7025,7 +7046,7 @@ void Item_time_literal::print(String *str, enum_query_type query_type)
 {
   str->append("TIME'");
   char buf[MAX_DATE_STRING_REP_LENGTH];
-  my_time_to_str(&cached_time, buf, decimals);
+  my_time_to_str(cached_time.get_mysql_time(), buf, decimals);
   str->append(buf);
   str->append('\'');
 }
@@ -7039,7 +7060,7 @@ Item *Item_time_literal::clone_item(THD *thd)
 
 bool Item_time_literal::get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate)
 {
-  *ltime= cached_time;
+  cached_time.copy_to_mysql_time(ltime);
   if (fuzzydate & TIME_TIME_ONLY)
     return (null_value= false);
   return (null_value= check_date_with_warn(thd, ltime, fuzzydate,
@@ -7475,7 +7496,6 @@ Item *find_producing_item(Item *item, st_select_lex *sel)
   DBUG_ASSERT(item->type() == Item::FIELD_ITEM ||
               (item->type() == Item::REF_ITEM &&
                ((Item_ref *) item)->ref_type() == Item_ref::VIEW_REF)); 
-  Item *producing_item;
   Item_field *field_item= NULL;
   Item_equal *item_equal= item->get_item_equal();
   table_map tab_map= sel->master_unit()->derived->table->map;
@@ -7497,6 +7517,7 @@ Item *find_producing_item(Item *item, st_select_lex *sel)
   List_iterator_fast<Item> li(sel->item_list);
   if (field_item)
   {
+    Item *producing_item= NULL;
     uint field_no= field_item->field->field_index;
     for (uint i= 0; i <= field_no; i++)
       producing_item= li++;
@@ -9899,23 +9920,20 @@ Item *Item_cache_temporal::convert_to_basic_const_item(THD *thd)
 
 Item *Item_cache_datetime::make_literal(THD *thd)
 {
-  MYSQL_TIME ltime;
-  unpack_time(val_datetime_packed(thd), &ltime, MYSQL_TIMESTAMP_DATETIME);
-  return new (thd->mem_root) Item_datetime_literal(thd, &ltime, decimals);
+  Datetime dt(thd, this, TIME_CONV_NONE | TIME_FRAC_NONE);
+  return new (thd->mem_root) Item_datetime_literal(thd, &dt, decimals);
 }
 
 Item *Item_cache_date::make_literal(THD *thd)
 {
-  MYSQL_TIME ltime;
-  unpack_time(val_datetime_packed(thd), &ltime, MYSQL_TIMESTAMP_DATE);
-  return new (thd->mem_root) Item_date_literal(thd, &ltime);
+  Date d(thd, this, TIME_CONV_NONE | TIME_FRAC_NONE);
+  return new (thd->mem_root) Item_date_literal(thd, &d);
 }
 
 Item *Item_cache_time::make_literal(THD *thd)
 {
-  MYSQL_TIME ltime;
-  unpack_time(val_time_packed(thd), &ltime, MYSQL_TIMESTAMP_TIME);
-  return new (thd->mem_root) Item_time_literal(thd, &ltime, decimals);
+  Time t(thd, this);
+  return new (thd->mem_root) Item_time_literal(thd, &t, decimals);
 }
 
 

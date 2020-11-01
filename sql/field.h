@@ -1394,6 +1394,8 @@ public:
   virtual uint max_packed_col_length(uint max_length)
   { return max_length;}
 
+  virtual bool is_packable() const { return false; }
+
   uint offset(const uchar *record) const
   {
     return (uint) (ptr - record);
@@ -1401,6 +1403,8 @@ public:
   void copy_from_tmp(int offset);
   uint fill_cache_field(struct st_cache_field *copy);
   virtual bool get_date(MYSQL_TIME *ltime, date_mode_t fuzzydate);
+  virtual longlong val_datetime_packed(THD *thd);
+  virtual longlong val_time_packed(THD *thd);
   virtual TYPELIB *get_typelib() const { return NULL; }
   virtual CHARSET_INFO *charset(void) const { return &my_charset_bin; }
   virtual CHARSET_INFO *charset_for_protocol(void) const
@@ -1984,6 +1988,7 @@ public:
   bool can_optimize_range(const Item_bool_func *cond,
                           const Item *item,
                           bool is_eq_func) const;
+  bool is_packable() const { return true; }
 };
 
 /* base class for float and double and decimal (old one) */
@@ -3167,6 +3172,7 @@ public:
   void sql_type(String &str) const;
   bool get_date(MYSQL_TIME *ltime, date_mode_t fuzzydate)
   { return Field_newdate::get_TIME(ltime, ptr, fuzzydate); }
+  longlong val_datetime_packed(THD *thd);
   uint size_of() const { return sizeof(*this); }
   Item *get_equal_const_item(THD *thd, const Context &ctx, Item *const_item);
 };
@@ -3213,6 +3219,8 @@ public:
            decimals() == from->decimals();
   }
   sql_mode_t conversion_depends_on_sql_mode(THD *, Item *) const;
+  int store_native(const Native &value);
+  bool val_native(Native *to);
   int store_time_dec(const MYSQL_TIME *ltime, uint dec);
   int store(const char *to,size_t length,CHARSET_INFO *charset);
   int store(double nr);
@@ -3334,6 +3342,9 @@ public:
   }
   int reset();
   bool get_date(MYSQL_TIME *ltime, date_mode_t fuzzydate);
+  longlong val_time_packed(THD *thd);
+  int store_native(const Native &value);
+  bool val_native(Native *to);
   uint size_of() const { return sizeof(*this); }
 };
 
@@ -3491,6 +3502,7 @@ public:
   int reset();
   bool get_date(MYSQL_TIME *ltime, date_mode_t fuzzydate)
   { return Field_datetimef::get_TIME(ltime, ptr, fuzzydate); }
+  longlong val_datetime_packed(THD *thd);
   uint size_of() const { return sizeof(*this); }
 };
 

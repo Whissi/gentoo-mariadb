@@ -793,15 +793,14 @@ extern int ORAdebug;
     XA_SYM = 1003,
     XML_SYM = 1004,
     YEAR_SYM = 1005,
-    PREC_BELOW_ESCAPE = 1006,
-    CONDITIONLESS_JOIN = 1007,
-    ON_SYM = 1008,
-    PREC_BELOW_NOT = 1009,
-    SUBQUERY_AS_EXPR = 1010,
-    PREC_BELOW_IDENTIFIER_OPT_SPECIAL_CASE = 1011,
-    USER = 1012,
-    PREC_BELOW_CONTRACTION_TOKEN2 = 1013,
-    EMPTY_FROM_CLAUSE = 1014
+    CONDITIONLESS_JOIN = 1006,
+    ON_SYM = 1007,
+    PREC_BELOW_NOT = 1008,
+    SUBQUERY_AS_EXPR = 1009,
+    PREC_BELOW_IDENTIFIER_OPT_SPECIAL_CASE = 1010,
+    USER = 1011,
+    PREC_BELOW_CONTRACTION_TOKEN2 = 1012,
+    EMPTY_FROM_CLAUSE = 1013
   };
 #endif
 
@@ -810,7 +809,7 @@ extern int ORAdebug;
 typedef union YYSTYPE YYSTYPE;
 union YYSTYPE
 {
-#line 165 "/home/buildbot/git/sql/sql_yacc_ora.yy" /* yacc.c:1909  */
+#line 173 "/home/buildbot/git/sql/sql_yacc_ora.yy" /* yacc.c:1909  */
 
   int  num;
   ulong ulong_num;
@@ -935,7 +934,7 @@ union YYSTYPE
   enum Column_definition::enum_column_versioning vers_column_versioning;
   enum plsql_cursor_attr_t plsql_cursor_attr;
 
-#line 939 "/home/buildbot/git/mkdist/sql/sql_yacc_ora.hh" /* yacc.c:1909  */
+#line 938 "/home/buildbot/git/mkdist/sql/sql_yacc_ora.hh" /* yacc.c:1909  */
 };
 # define YYSTYPE_IS_TRIVIAL 1
 # define YYSTYPE_IS_DECLARED 1

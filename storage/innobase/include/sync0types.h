@@ -208,7 +208,6 @@ enum latch_level_t {
 
 	SYNC_FTS_TOKENIZE,
 	SYNC_FTS_OPTIMIZE,
-	SYNC_FTS_BG_THREADS,
 	SYNC_FTS_CACHE_INIT,
 	SYNC_RECV,
 	SYNC_LOG_FLUSH_ORDER,
@@ -217,7 +216,6 @@ enum latch_level_t {
 	SYNC_PAGE_CLEANER,
 	SYNC_PURGE_QUEUE,
 	SYNC_TRX_SYS_HEADER,
-	SYNC_REC_LOCK,
 	SYNC_THREADS,
 	SYNC_TRX,
 	SYNC_RW_TRX_HASH_ELEMENT,
@@ -258,8 +256,6 @@ enum latch_level_t {
 
 	SYNC_DICT_OPERATION,
 
-	SYNC_TRX_I_S_LAST_READ,
-
 	SYNC_TRX_I_S_RWLOCK,
 
 	SYNC_RECV_WRITER,
@@ -284,15 +280,12 @@ enum latch_id_t {
 	LATCH_ID_BUF_BLOCK_MUTEX,
 	LATCH_ID_BUF_POOL,
 	LATCH_ID_BUF_POOL_ZIP,
-	LATCH_ID_CACHE_LAST_READ,
 	LATCH_ID_DICT_FOREIGN_ERR,
 	LATCH_ID_DICT_SYS,
 	LATCH_ID_FILE_FORMAT_MAX,
 	LATCH_ID_FIL_SYSTEM,
 	LATCH_ID_FLUSH_LIST,
-	LATCH_ID_FTS_BG_THREADS,
 	LATCH_ID_FTS_DELETE,
-	LATCH_ID_FTS_OPTIMIZE,
 	LATCH_ID_FTS_DOC_ID,
 	LATCH_ID_FTS_PLL_TOKENIZE,
 	LATCH_ID_HASH_TABLE_MUTEX,
@@ -360,7 +353,6 @@ enum latch_id_t {
 	LATCH_ID_SCRUB_STAT_MUTEX,
 	LATCH_ID_DEFRAGMENT_MUTEX,
 	LATCH_ID_BTR_DEFRAGMENT_MUTEX,
-	LATCH_ID_FIL_CRYPT_MUTEX,
 	LATCH_ID_FIL_CRYPT_STAT_MUTEX,
 	LATCH_ID_FIL_CRYPT_DATA_MUTEX,
 	LATCH_ID_FIL_CRYPT_THREADS_MUTEX,
@@ -646,10 +638,10 @@ public:
 	}
 
 	/** Iterate over the counters */
-	template <typename Callback>
-	void iterate(Callback& callback) const
-		UNIV_NOTHROW
+	template<typename C> void iterate(const C& callback) UNIV_NOTHROW
 	{
+		m_mutex.enter();
+
 		Counters::const_iterator	end = m_counters.end();
 
 		for (Counters::const_iterator it = m_counters.begin();
@@ -658,6 +650,8 @@ public:
 
 			callback(*it);
 		}
+
+		m_mutex.exit();
 	}
 
 	/** Disable the monitoring */

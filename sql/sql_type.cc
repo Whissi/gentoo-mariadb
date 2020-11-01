@@ -628,6 +628,23 @@ uint Interval_DDhhmmssff::fsp(THD *thd, Item *item)
 }
 
 
+bool Time::to_native(Native *to, uint decimals) const
+{
+  if (!is_valid_time())
+  {
+    to->length(0);
+    return true;
+  }
+  uint len= my_time_binary_length(decimals);
+  if (to->reserve(len))
+    return true;
+  longlong tmp= TIME_to_longlong_time_packed(get_mysql_time());
+  my_time_packed_to_binary(tmp, (uchar*) to->ptr(), decimals);
+  to->length(len);
+  return false;
+}
+
+
 void Time::make_from_item(THD *thd, int *warn, Item *item, const Options opt)
 {
   *warn= 0;
@@ -809,6 +826,28 @@ void Time::make_from_time(int *warn, const MYSQL_TIME *from)
     *(static_cast<MYSQL_TIME*>(this))= *from;
     adjust_time_range_or_invalidate(warn);
   }
+}
+
+
+uint Time::binary_length_to_precision(uint length)
+{
+  switch (length) {
+  case 3: return 0;
+  case 4: return 2;
+  case 5: return 4;
+  case 6: return 6;
+  }
+  DBUG_ASSERT(0);
+  return 0;
+}
+
+
+Time::Time(const Native &native)
+{
+  uint dec= binary_length_to_precision(native.length());
+  longlong tmp= my_time_packed_from_binary((const uchar *) native.ptr(), dec);
+  TIME_from_longlong_time_packed(this, tmp);
+  DBUG_ASSERT(is_valid_time());
 }
 
 
@@ -1453,6 +1492,13 @@ const Type_handler *
 Type_handler_timestamp_common::type_handler_for_native_format() const
 {
   return &type_handler_timestamp2;
+}
+
+
+const Type_handler *
+Type_handler_time_common::type_handler_for_native_format() const
+{
+  return &type_handler_time2;
 }
 
 
@@ -4126,6 +4172,7 @@ bool Type_handler_temporal_result::
        Item_func_min_max_fix_attributes(THD *thd, Item_func_min_max *func,
                                         Item **items, uint nitems) const
 {
+  DBUG_ASSERT(func->field_type() != MYSQL_TYPE_DATE);
   bool rc= Type_handler::Item_func_min_max_fix_attributes(thd, func,
                                                           items, nitems);
   bool is_time= func->field_type() == MYSQL_TYPE_TIME;
@@ -4180,7 +4227,6 @@ bool Type_handler_temporal_result::
         DATETIME             DATETIME       no conversion
         DATETIME             TIMESTAMP      safe conversion
         DATETIME             DATE           safe conversion
-        DATE                 DATE           no conversion
         TIME                 TIME           no conversion
 
         Note, a function cannot return TIMESTAMP if it has non-TIMESTAMP
@@ -4197,9 +4243,6 @@ bool Type_handler_temporal_result::
       -------------------- ------------- -------
       TIMESTAMP            TIME          Not possible
       DATETIME             TIME          depends on OLD_MODE_ZERO_DATE_TIME_CAST
-      DATE                 TIMESTAMP     Not possible
-      DATE                 DATETIME      Not possible
-      DATE                 TIME          Not possible
       TIME                 TIMESTAMP     Not possible
       TIME                 DATETIME      Not possible
       TIME                 DATE          Not possible
@@ -4219,6 +4262,30 @@ bool Type_handler_temporal_result::
     break;
   }
   return rc;
+}
+
+
+bool Type_handler_date_common::
+       Item_func_min_max_fix_attributes(THD *thd, Item_func_min_max *func,
+                                        Item **items, uint nitems) const
+{
+  func->fix_attributes_date();
+  if (func->maybe_null)
+    return false;
+  /*
+    We cannot trust the generic maybe_null value calculated during fix_fields().
+    If a conversion from non-temoral types to DATE happens,
+    then the result can be NULL (even if all arguments are not NULL).
+  */
+  for (uint i= 0; i < nitems; i++)
+  {
+    if (items[i]->type_handler()->cmp_type() != TIME_RESULT)
+    {
+      func->maybe_null= true;
+      break;
+    }
+  }
+  return false;
 }
 
 
@@ -5130,8 +5197,11 @@ cmp_item *Type_handler_timestamp_common::make_cmp_item(THD *thd,
 
 /***************************************************************************/
 
-static int srtcmp_in(CHARSET_INFO *cs, const String *x,const String *y)
+static int srtcmp_in(const void *cs_, const void *x_, const void *y_)
 {
+  const CHARSET_INFO *cs= static_cast<const CHARSET_INFO *>(cs_);
+  const String *x= static_cast<const String *>(x_);
+  const String *y= static_cast<const String *>(y_);
   return cs->coll->strnncollsp(cs,
                                (uchar *) x->ptr(),x->length(),
                                (uchar *) y->ptr(),y->length());
@@ -8324,7 +8394,10 @@ Type_handler_date_common::create_literal_item(THD *thd,
   if (tmp.is_valid_temporal() &&
       tmp.get_mysql_time()->time_type == MYSQL_TIMESTAMP_DATE &&
       !have_important_literal_warnings(&st))
-    item= new (thd->mem_root) Item_date_literal(thd, tmp.get_mysql_time());
+  {
+    Date d(&tmp);
+    item= new (thd->mem_root) Item_date_literal(thd, &d);
+  }
   literal_warn(thd, item, str, length, cs, &st, "DATE", send_error);
   return item;
 }
@@ -8343,8 +8416,10 @@ Type_handler_temporal_with_date::create_literal_item(THD *thd,
   if (tmp.is_valid_temporal() &&
       tmp.get_mysql_time()->time_type == MYSQL_TIMESTAMP_DATETIME &&
       !have_important_literal_warnings(&st))
-    item= new (thd->mem_root) Item_datetime_literal(thd, tmp.get_mysql_time(),
-                                                    st.precision);
+  {
+    Datetime dt(&tmp);
+    item= new (thd->mem_root) Item_datetime_literal(thd, &dt, st.precision);
+  }
   literal_warn(thd, item, str, length, cs, &st, "DATETIME", send_error);
   return item;
 }
@@ -8363,10 +8438,54 @@ Type_handler_time_common::create_literal_item(THD *thd,
   Time tmp(thd, &st, str, length, cs, opt);
   if (tmp.is_valid_time() &&
       !have_important_literal_warnings(&st))
-    item= new (thd->mem_root) Item_time_literal(thd, tmp.get_mysql_time(),
-                                                st.precision);
+    item= new (thd->mem_root) Item_time_literal(thd, &tmp, st.precision);
   literal_warn(thd, item, str, length, cs, &st, "TIME", send_error);
   return item;
+}
+
+
+bool
+Type_handler_time_common::Item_val_native_with_conversion(THD *thd,
+                                                          Item *item,
+                                                          Native *to) const
+{
+  if (item->type_handler()->type_handler_for_native_format() ==
+      &type_handler_time2)
+    return item->val_native(thd, to);
+  return Time(thd, item).to_native(to, item->time_precision(thd));
+}
+
+
+bool
+Type_handler_time_common::Item_val_native_with_conversion_result(THD *thd,
+                                                                 Item *item,
+                                                                 Native *to)
+                                                                 const
+{
+  if (item->type_handler()->type_handler_for_native_format() ==
+      &type_handler_time2)
+    return item->val_native_result(thd, to);
+  MYSQL_TIME ltime;
+  if (item->get_date_result(thd, &ltime, Time::Options(thd)))
+    return true;
+  int warn;
+  return Time(&warn, &ltime, 0).to_native(to, item->time_precision(thd));
+}
+
+
+int Type_handler_time_common::cmp_native(const Native &a,
+                                         const Native &b) const
+{
+  // Optimize a simple case: equal fractional precision:
+  if (a.length() == b.length())
+    return memcmp(a.ptr(), b.ptr(), a.length());
+  longlong lla= Time(a).to_packed();
+  longlong llb= Time(b).to_packed();
+  if (lla < llb)
+    return -1;
+  if (lla> llb)
+    return 1;
+  return 0;
 }
 
 
@@ -8477,6 +8596,15 @@ Type_handler_timestamp_common::Item_param_val_native(THD *thd,
   return
     item->get_date(thd, &ltime, Datetime::Options(TIME_NO_ZERO_IN_DATE, thd)) ||
     TIME_to_native(thd, &ltime, to, item->datetime_precision(thd));
+}
+
+
+bool
+Type_handler_time_common::Item_param_val_native(THD *thd,
+                                                Item_param *item,
+                                                Native *to) const
+{
+  return Time(thd, item).to_native(to, item->decimals);
 }
 
 
