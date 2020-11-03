@@ -42,6 +42,18 @@ struct ms3_st
   char *s3secret;
   char *region;
   char *base_domain;
+  int port; // 0 means "Use default"
+
+  char *sts_endpoint;
+  char *sts_region;
+  char *iam_endpoint;
+  char *iam_role;
+  char *role_key;
+  char *role_secret;
+  char *role_session_token;
+  char *iam_role_arn;
+  size_t role_session_duration;
+
   size_t buffer_chunk_size;
   CURL *curl;
   char *last_error;

@@ -19,6 +19,8 @@
 
 #if MYSQL_VERSION_ID < 50500
 #define spider_my_free(A,B) my_free(A,B)
+#define pthread_mutex_assert_owner(A)
+#define pthread_mutex_assert_not_owner(A)
 #else
 #define spider_my_free(A,B) my_free(A)
 #ifdef pthread_mutex_t
@@ -41,6 +43,8 @@
 #undef pthread_mutex_destroy
 #endif
 #define pthread_mutex_destroy mysql_mutex_destroy
+#define pthread_mutex_assert_owner(A) mysql_mutex_assert_owner(A)
+#define pthread_mutex_assert_not_owner(A) mysql_mutex_assert_not_owner(A)
 #ifdef pthread_cond_t
 #undef pthread_cond_t
 #endif
@@ -228,7 +232,7 @@ const char SPIDER_empty_string = "";
 #define SPIDER_HAS_HASH_VALUE_TYPE
 #endif
 
-#if defined(MARIADB_BASE_VERSION) && MYSQL_VERSION_ID >=	100400
+#if defined(MARIADB_BASE_VERSION) && MYSQL_VERSION_ID >= 100400
 #define SPIDER_date_mode_t(A) date_mode_t(A)
 #define SPIDER_str_to_datetime(A,B,C,D,E) str_to_datetime_or_date(A,B,C,D,E)
 #define SPIDER_get_linkage(A) A->get_linkage()
@@ -236,6 +240,33 @@ const char SPIDER_empty_string = "";
 #define SPIDER_date_mode_t(A) A
 #define SPIDER_str_to_datetime(A,B,C,D,E) str_to_datetime(A,B,C,D,E)
 #define SPIDER_get_linkage(A) A->linkage
+#endif
+
+#if defined(MARIADB_BASE_VERSION) && MYSQL_VERSION_ID >= 100500
+typedef start_new_trans *SPIDER_Open_tables_backup;
+#elif MYSQL_VERSION_ID < 50500
+typedef Open_tables_state SPIDER_Open_tables_backup;
+#else
+typedef Open_tables_backup SPIDER_Open_tables_backup;
+#endif
+
+#if defined(MARIADB_BASE_VERSION) && MYSQL_VERSION_ID >= 100500
+#define SPIDER_reset_n_backup_open_tables_state(A,B,C) do { \
+  if (!(*(B) = new start_new_trans(A))) \
+  { \
+    DBUG_RETURN(C); \
+  } \
+} while (0)
+#define SPIDER_restore_backup_open_tables_state(A,B) do { \
+  (*(B))->restore_old_transaction(); \
+  delete *(B); \
+} while (0)
+#define SPIDER_sys_close_thread_tables(A) (A)->commit_whole_transaction_and_close_tables()
+#else
+#define SPIDER_REQUIRE_DEFINE_FOR_SECONDARY_OPEN_TABLES_BACKUP
+#define SPIDER_reset_n_backup_open_tables_state(A,B,C) (A)->reset_n_backup_open_tables_state(B)
+#define SPIDER_restore_backup_open_tables_state(A,B) (A)->restore_backup_open_tables_state(B)
+#define SPIDER_sys_close_thread_tables(A) close_thread_tables(A)
 #endif
 
 #define spider_bitmap_size(A) ((A + 7) / 8)
@@ -1330,7 +1361,7 @@ typedef struct st_spider_direct_sql
   TABLE_LIST           *table_list_first;
   TABLE_LIST           *table_list;
   uchar                *real_table_bitmap;
-  Open_tables_backup   open_tables_backup;
+  SPIDER_Open_tables_backup open_tables_backup;
   THD                  *open_tables_thd;
 #endif
 

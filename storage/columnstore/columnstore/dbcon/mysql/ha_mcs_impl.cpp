@@ -260,8 +260,6 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
     {
         case MYSQL_TYPE_NEWDECIMAL:
         {
-            Field_new_decimal* f2 = (Field_new_decimal*)*f;
-
             // @bug4388 stick to InfiniDB's scale in case mysql gives wrong scale due
             // to create vtable limitation.
             //if (f2->dec < ct.scale)
@@ -269,7 +267,7 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
 
             char buf[256];
             dataconvert::DataConvert::decimalToString(value, (unsigned)ct.scale, buf, 256, ct.colDataType);
-            f2->store(buf, strlen(buf), f2->charset());
+            (*f)->store(buf, strlen(buf), (*f)->charset());
             break;
         }
 
@@ -277,7 +275,7 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
         {
             Field_tiny* f2 = (Field_tiny*)*f;
             longlong int_val = (longlong)value;
-            f2->store(int_val, f2->unsigned_flag);
+            (*f)->store(int_val, f2->unsigned_flag);
             break;
         }
 
@@ -285,7 +283,7 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
         {
             Field_short* f2 = (Field_short*)*f;
             longlong int_val = (longlong)value;
-            f2->store(int_val, f2->unsigned_flag);
+            (*f)->store(int_val, f2->unsigned_flag);
             break;
         }
 
@@ -293,7 +291,7 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
         {
             Field_medium* f2 = (Field_medium*)*f;
             longlong int_val = (longlong)value;
-            f2->store(int_val, f2->unsigned_flag);
+            (*f)->store(int_val, f2->unsigned_flag);
             break;
         }
 
@@ -301,7 +299,7 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
         {
             Field_long* f2 = (Field_long*)*f;
             longlong int_val = (longlong)value;
-            f2->store(int_val, f2->unsigned_flag);
+            (*f)->store(int_val, f2->unsigned_flag);
             break;
         }
 
@@ -309,37 +307,33 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
         {
             Field_longlong* f2 = (Field_longlong*)*f;
             longlong int_val = (longlong)value;
-            f2->store(int_val, f2->unsigned_flag);
+            (*f)->store(int_val, f2->unsigned_flag);
             break;
         }
 
         case MYSQL_TYPE_FLOAT: // FLOAT type
         {
-            Field_float* f2 = (Field_float*)*f;
             float float_val = *(float*)(&value);
-            f2->store(float_val);
+            (*f)->store(float_val);
             break;
         }
 
         case MYSQL_TYPE_DOUBLE: // DOUBLE type
         {
-            Field_double* f2 = (Field_double*)*f;
             double double_val = *(double*)(&value);
-            f2->store(double_val);
+            (*f)->store(double_val);
             break;
         }
 
         case MYSQL_TYPE_VARCHAR:
         {
-            Field_varstring* f2 = (Field_varstring*)*f;
             char tmp[25];
-
             if (ct.colDataType == CalpontSystemCatalog::DECIMAL)
                 dataconvert::DataConvert::decimalToString(value, (unsigned)ct.scale, tmp, 25, ct.colDataType);
             else
                 snprintf(tmp, 25, "%lld", (long long)value);
 
-            f2->store(tmp, strlen(tmp), f2->charset());
+            (*f)->store(tmp, strlen(tmp), (*f)->charset());
             break;
         }
 
@@ -347,7 +341,7 @@ void storeNumericField(Field** f, int64_t value, CalpontSystemCatalog::ColType& 
         {
             Field_longlong* f2 = (Field_longlong*)*f;
             longlong int_val = (longlong)value;
-            f2->store(int_val, f2->unsigned_flag);
+            (*f)->store(int_val, f2->unsigned_flag);
             break;
         }
     }
@@ -550,8 +544,7 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
                         colType.colDataType == CalpontSystemCatalog::VARCHAR ||
                         colType.colDataType == CalpontSystemCatalog::VARBINARY)
                 {
-                    Field_varstring* f2 = (Field_varstring*)*f;
-                    f2->store(tmp, 0, f2->charset());
+                    (*f)->store(tmp, 0, (*f)->charset());
                 }
 
                 continue;
@@ -567,8 +560,7 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
 
                     intColVal = row.getUintField<4>(s);
                     DataConvert::dateToString(intColVal, tmp, 255);
-                    Field_varstring* f2 = (Field_varstring*)*f;
-                    f2->store(tmp, strlen(tmp), f2->charset());
+                    (*f)->store(tmp, strlen(tmp), (*f)->charset());
                     break;
                 }
 
@@ -579,16 +571,7 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
 
                     intColVal = row.getUintField<8>(s);
                     DataConvert::datetimeToString(intColVal, tmp, 255, colType.precision);
-
-                    /* setting the field_length is a sort-of hack. The length
-                     * at this point can be long enough to include mseconds.
-                     * ColumnStore doesn't fully support mseconds yet so if
-                     * they are requested, trim them off.
-                     * At a later date we should set this more intelligently
-                     * based on the result set.
-                     */
-                    Field_varstring* f2 = (Field_varstring*)*f;
-                    f2->store(tmp, strlen(tmp), f2->charset());
+                    (*f)->store(tmp, strlen(tmp), (*f)->charset());
                     break;
                 }
 
@@ -599,9 +582,7 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
 
                     intColVal = row.getUintField<8>(s);
                     DataConvert::timeToString(intColVal, tmp, 255, colType.precision);
-
-                    Field_varstring* f2 = (Field_varstring*)*f;
-                    f2->store(tmp, strlen(tmp), f2->charset());
+                    (*f)->store(tmp, strlen(tmp), (*f)->charset());
                     break;
                 }
 
@@ -612,32 +593,28 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
 
                     intColVal = row.getUintField<8>(s);
                     DataConvert::timestampToString(intColVal, tmp, 255, current_thd->variables.time_zone->get_name()->ptr(), colType.precision);
-
-                    Field_varstring* f2 = (Field_varstring*)*f;
-                    f2->store(tmp, strlen(tmp), f2->charset());
+                    (*f)->store(tmp, strlen(tmp), (*f)->charset());
                     break;
                 }
 
                 case CalpontSystemCatalog::CHAR:
                 case CalpontSystemCatalog::VARCHAR:
                 {
-                    Field_varstring* f2 = (Field_varstring*)*f;
-
                     switch (colType.colWidth)
                     {
                         case 1:
                             intColVal = row.getUintField<1>(s);
-                            f2->store((char*)(&intColVal), strlen((char*)(&intColVal)), f2->charset());
+                            (*f)->store((char*)(&intColVal), strlen((char*)(&intColVal)), (*f)->charset());
                             break;
 
                         case 2:
                             intColVal = row.getUintField<2>(s);
-                            f2->store((char*)(&intColVal), strlen((char*)(&intColVal)), f2->charset());
+                            (*f)->store((char*)(&intColVal), strlen((char*)(&intColVal)), (*f)->charset());
                             break;
 
                         case 4:
                             intColVal = row.getUintField<4>(s);
-                            f2->store((char*)(&intColVal), strlen((char*)(&intColVal)), f2->charset());
+                            (*f)->store((char*)(&intColVal), strlen((char*)(&intColVal)), (*f)->charset());
                             break;
 
                         case 8:
@@ -645,11 +622,11 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
                             intColVal = row.getUintField<8>(s);
                             memcpy(tmp, &intColVal, 8);
                             tmp[8] = 0;
-                            f2->store(tmp, strlen(tmp), f2->charset());
+                            (*f)->store(tmp, strlen(tmp), (*f)->charset());
                             break;
 
                         default:
-                            f2->store((const char*)row.getStringPointer(s), row.getStringLength(s), f2->charset());
+                            (*f)->store((const char*)row.getStringPointer(s), row.getStringLength(s), (*f)->charset());
                     }
 
                     if ((*f)->null_ptr)
@@ -660,8 +637,6 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
 
                 case CalpontSystemCatalog::VARBINARY:
                 {
-                    Field_varstring* f2 = (Field_varstring*)*f;
-
                     if (get_varbin_always_hex(current_thd))
                     {
                         uint32_t l;
@@ -669,10 +644,10 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
                         uint32_t ll = l * 2;
                         boost::scoped_array<char> sca(new char[ll]);
                         vbin2hex(p, l, sca.get());
-                        f2->store(sca.get(), ll, f2->charset());
+                        (*f)->store(sca.get(), ll, (*f)->charset());
                     }
                     else
-                        f2->store((const char*)row.getVarBinaryField(s), row.getVarBinaryLength(s), f2->charset());
+                        (*f)->store((const char*)row.getVarBinaryField(s), row.getVarBinaryLength(s), (*f)->charset());
 
                     if ((*f)->null_ptr)
                         *(*f)->null_ptr &= ~(*f)->null_bit;
@@ -748,13 +723,11 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
                     if (dl == std::numeric_limits<float>::infinity())
                         continue;
 
-                    Field_float* f2 = (Field_float*)*f;
                     // bug 3485, reserve enough space for the longest float value
                     // -3.402823466E+38 to -1.175494351E-38, 0, and
                     // 1.175494351E-38 to 3.402823466E+38.
                     (*f)->field_length = 40;
-
-                    f2->store(dl);
+                    (*f)->store(dl);
 
                     if ((*f)->null_ptr)
                         *(*f)->null_ptr &= ~(*f)->null_bit;
@@ -770,22 +743,28 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
                     if (dl == std::numeric_limits<double>::infinity())
                         continue;
 
-                    Field_double* f2 = (Field_double*)*f;
-                    // bug 3483, reserve enough space for the longest double value
-                    // -1.7976931348623157E+308 to -2.2250738585072014E-308, 0, and
-                    // 2.2250738585072014E-308 to 1.7976931348623157E+308.
-                    (*f)->field_length = 310;
-
-                    // The server converts dl=-0 to dl=0 in f2->store().
-                    // This happens in the call to truncate_double().
-                    // This is an unexpected behaviour, so we directly store the
-                    // double value using the lower level float8store() function.
-                    // TODO Remove this when f2->store() handles this properly.
-                    if (dl == 0)
-                        float8store(f2->ptr,dl);
+                    if ((*f)->type() == MYSQL_TYPE_NEWDECIMAL)
+                    {
+                        char buf[310];
+                        // reserve enough space for the longest double value
+                        // -1.7976931348623157E+308 to -2.2250738585072014E-308, 0, and
+                        // 2.2250738585072014E-308 to 1.7976931348623157E+308.
+                        snprintf(buf, 310, "%.18g", dl);
+                        (*f)->store(buf, strlen(buf), (*f)->charset());
+                    }
                     else
-                        f2->store(dl);
-
+                    {
+                        // The server converts dl=-0 to dl=0 in (*f)->store().
+                        // This happens in the call to truncate_double().
+                        // This is an unexpected behaviour, so we directly store the
+                        // double value using the lower level float8store() function.
+                        // TODO Remove this when (*f)->store() handles this properly.
+                        (*f)->field_length = 310;
+                        if (dl == 0)
+                            float8store((*f)->ptr,dl);
+                        else
+                            (*f)->store(dl);
+                    }
                     if ((*f)->null_ptr)
                         *(*f)->null_ptr &= ~(*f)->null_bit;
 
@@ -800,38 +779,22 @@ int fetchNextRow(uchar* buf, cal_table_info& ti, cal_connection_info* ci, bool h
                         continue;
                     }
 
-                    switch((*f)->type())
+                    if ((*f)->type() == MYSQL_TYPE_NEWDECIMAL)
                     {
-                        case MYSQL_TYPE_NEWDECIMAL:
-                        {
-                            char buf[310];
-                            Field_new_decimal* f2 = (Field_new_decimal*)*f;
-                            snprintf(buf, 310, "%.20Lg", dl);
-                            f2->store(buf, strlen(buf), f2->charset());
-                            if ((*f)->null_ptr)
-                                *(*f)->null_ptr &= ~(*f)->null_bit;
-                        }
-                        break;
-                        case MYSQL_TYPE_DOUBLE:
-                        {
-                            Field_double* f2 = (Field_double*)*f;
-
-                            // bug 3483, reserve enough space for the longest double value
-                            // -1.7976931348623157E+308 to -2.2250738585072014E-308, 0, and
-                            // 2.2250738585072014E-308 to 1.7976931348623157E+308.
-                            (*f)->field_length = 310;
-
-                            f2->store(static_cast<double>(dl));
-                            if ((*f)->null_ptr)
-                                *(*f)->null_ptr &= ~(*f)->null_bit;
-                        }
-                        break;
-                        default:
-                        {
-                            continue;  // Shouldn't happen. Functions should not return long double to other than double or decimal return type.
-                        }
+                        char buf[310];
+                        snprintf(buf, 310, "%.20Lg", dl);
+                        (*f)->store(buf, strlen(buf), (*f)->charset());
                     }
-
+                    else
+                    {
+                        // reserve enough space for the longest double value
+                        // -1.7976931348623157E+308 to -2.2250738585072014E-308, 0, and
+                        // 2.2250738585072014E-308 to 1.7976931348623157E+308.
+                        (*f)->field_length = 310;
+                        (*f)->store(static_cast<double>(dl));
+                    }
+                    if ((*f)->null_ptr)
+                        *(*f)->null_ptr &= ~(*f)->null_bit;
                     break;
                 }
 
@@ -1002,8 +965,6 @@ vector<string> getOnUpdateTimestampColumns(string& schema, string& tableName, in
     boost::shared_ptr<CalpontSystemCatalog> csc = CalpontSystemCatalog::makeCalpontSystemCatalog(sessionID);
     csc->identity(execplan::CalpontSystemCatalog::FE);
     CalpontSystemCatalog::TableName aTableName;
-    boost::algorithm::to_lower(schema);
-    boost::algorithm::to_lower(tableName);
 
     // select columnname from calpontsys.syscolumn
     // where schema = schema and tablename = tableName
@@ -1341,11 +1302,18 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
             else
                 aliasName = item->table_name.str;
 
+            if (lower_case_table_names)
+            {
+                boost::algorithm::to_lower(aliasName);
+                boost::algorithm::to_lower(tableName);
+                boost::algorithm::to_lower(tmpTableName);
+            }
+
             if (strcasecmp(tableName.c_str(), "") == 0)
             {
                 tableName = tmpTableName;
             }
-            else if (strcasecmp(tableName.c_str(), tmpTableName.c_str()) != 0)
+            else if (strcmp(tableName.c_str(), tmpTableName.c_str()) != 0)
             {
                 //@ Bug3326 error out for multi table update
                 string emsg(IDBErrorInfo::instance()->errorMsg(ERR_UPDATE_NOT_SUPPORT_FEATURE));
@@ -1369,8 +1337,13 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
                 }
             }
             else
+            {
                 schemaName = string(item->db_name.str);
-
+                if (lower_case_table_names)
+                {
+                    boost::algorithm::to_lower(schemaName);
+                }
+            }
             columnAssignmentPtr = new ColumnAssignment(item->name.str, "=", "");
             if (item->field_type() == MYSQL_TYPE_TIMESTAMP ||
                 item->field_type() == MYSQL_TYPE_TIMESTAMP2)
@@ -1604,6 +1577,11 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
         aTableName.schema = first_table->table->s->db.str;
         aTableName.table = first_table->table->s->table_name.str;
     }
+    if (lower_case_table_names)
+    {
+        boost::algorithm::to_lower(aTableName.schema);
+        boost::algorithm::to_lower(aTableName.table);
+    }
 
     CalpontDMLPackage* pDMLPackage = 0;
 //	dmlStmt += ";";
@@ -1641,6 +1619,12 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
                 schemaName = first_table->db.str;
                 tableName = first_table->table_name.str;
                 aliasName = first_table->alias.str;
+                if (lower_case_table_names)
+                {
+                    boost::algorithm::to_lower(schemaName);
+                    boost::algorithm::to_lower(tableName);
+                    boost::algorithm::to_lower(aliasName);
+                }
                 qualifiedTablName->fName = tableName;
                 qualifiedTablName->fSchema = schemaName;
                 pDMLPackage = CalpontDMLFactory::makeCalpontDMLPackageFromMysqlBuffer(dmlStatement);
@@ -1660,6 +1644,12 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
             schemaName = first_table->table->s->db.str;
             tableName = first_table->table->s->table_name.str;
             aliasName = first_table->alias.str;
+            if (lower_case_table_names)
+            {
+                boost::algorithm::to_lower(schemaName);
+                boost::algorithm::to_lower(tableName);
+                boost::algorithm::to_lower(aliasName);
+            }
             qualifiedTablName->fName = tableName;
             qualifiedTablName->fSchema = schemaName;
             pDMLPackage = CalpontDMLFactory::makeCalpontDMLPackageFromMysqlBuffer(dmlStatement);
@@ -1671,6 +1661,12 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
         schemaName = first_table->table->s->db.str;
         tableName = first_table->table->s->table_name.str;
         aliasName = first_table->alias.str;
+        if (lower_case_table_names)
+        {
+            boost::algorithm::to_lower(schemaName);
+            boost::algorithm::to_lower(tableName);
+            boost::algorithm::to_lower(aliasName);
+        }
         qualifiedTablName->fName = tableName;
         qualifiedTablName->fSchema = schemaName;
         pDMLPackage = CalpontDMLFactory::makeCalpontDMLPackageFromMysqlBuffer(dmlStatement);
@@ -1858,7 +1854,7 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
 
             try
             {
-                colrids = csc->columnRIDs(deleteTableName);
+                colrids = csc->columnRIDs(deleteTableName, false, lower_case_table_names);
             }
             catch (IDBExcept& ie)
             {
@@ -1953,7 +1949,7 @@ uint32_t doUpdateDelete(THD* thd, gp_walk_info& gwi, const std::vector<COND*>& c
     CalpontSystemCatalog::ROPair roPair;
     try
     {
-        roPair = csc->tableRID( aTableName );
+        roPair = csc->tableRID(aTableName);
     }
     catch (IDBExcept& ie)
     {
@@ -2275,7 +2271,7 @@ int ha_mcs_impl_discover_existence(const char* schema, const char* name)
 
     try
     {
-        const CalpontSystemCatalog::OID oid = csc->lookupTableOID(make_table(schema, name));
+        const CalpontSystemCatalog::OID oid = csc->lookupTableOID(make_table(schema, name, lower_case_table_names));
 
         if (oid)
             return 1;
@@ -2323,7 +2319,7 @@ int ha_mcs_impl_direct_update_delete_rows(bool execute, ha_rows *affected_rows, 
     return rc;
 }
 
-int ha_mcs_impl_rnd_init(TABLE* table, const std::vector<COND*>& condStack)
+int ha_mcs::impl_rnd_init(TABLE* table, const std::vector<COND*>& condStack)
 {
     IDEBUG( cout << "rnd_init for table " << table->s->table_name.str << endl );
     THD* thd = current_thd;
@@ -2385,8 +2381,19 @@ int ha_mcs_impl_rnd_init(TABLE* table, const std::vector<COND*>& condStack)
         return 0;
     }
 
-    //Update and delete code
-    if ( ((thd->lex)->sql_command == SQLCOM_UPDATE)  || ((thd->lex)->sql_command == SQLCOM_DELETE) || ((thd->lex)->sql_command == SQLCOM_DELETE_MULTI) || ((thd->lex)->sql_command == SQLCOM_UPDATE_MULTI))
+    /*
+      Update and delete code.
+      Note, we may be updating/deleting a different table,
+      and the current one is only needed for reading,
+      e.g. cstab1 is needed for reading in this example:
+
+      UPDATE innotab1 SET a=100 WHERE a NOT IN (SELECT a FROM cstab1 WHERE a=1);
+    */
+    if (!isReadOnly() && // make sure the current table is being modified
+        (thd->lex->sql_command == SQLCOM_UPDATE ||
+         thd->lex->sql_command == SQLCOM_DELETE ||
+         thd->lex->sql_command == SQLCOM_DELETE_MULTI ||
+         thd->lex->sql_command == SQLCOM_UPDATE_MULTI))
         return doUpdateDelete(thd, gwi, condStack);
 
     uint32_t sessionID = tid2sid(thd->thread_id);
@@ -2464,7 +2471,7 @@ int ha_mcs_impl_rnd_init(TABLE* table, const std::vector<COND*>& condStack)
             ti.csep->sessionID(sessionID);
 
             if (thd->db.length)
-                ti.csep->schemaName(thd->db.str);
+                ti.csep->schemaName(thd->db.str, lower_case_table_names);
 
             ti.csep->traceFlags(ci->traceFlags);
             ti.msTablePtr = table;
@@ -2655,7 +2662,7 @@ int ha_mcs_impl_rnd_init(TABLE* table, const std::vector<COND*>& condStack)
 
         // populate coltypes here for table mode because tableband gives treeoid for dictionary column
         {
-            CalpontSystemCatalog::RIDList oidlist = csc->columnRIDs(make_table(table->s->db.str, table->s->table_name.str), true);
+            CalpontSystemCatalog::RIDList oidlist = csc->columnRIDs(make_table(table->s->db.str, table->s->table_name.str, lower_case_table_names), true);
 
             if (oidlist.size() != num_attr)
             {
@@ -2728,7 +2735,6 @@ int ha_mcs_impl_rnd_next(uchar* buf, TABLE* table)
     if (get_fe_conn_info_ptr() == nullptr)
         set_fe_conn_info_ptr((void*)new cal_connection_info());
 
-    // @bug 3078
     if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD)
     {
         force_close_fep_conn(thd, ci);
@@ -2830,11 +2836,7 @@ int ha_mcs_impl_rnd_end(TABLE* table, bool is_pushdown_hand)
         ci = reinterpret_cast<cal_connection_info*>(get_fe_conn_info_ptr());
     }
 
-    // @bug 3078. Also session limit variable works the same as ctrl+c
-    if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD ||
-            ((thd->lex)->sql_command != SQLCOM_INSERT &&
-             (thd->lex)->sql_command != SQLCOM_INSERT_SELECT &&
-             thd->variables.select_limit != (uint64_t) - 1))
+    if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD)
     {
         force_close_fep_conn(thd, ci);
         // clear querystats because no query stats available for cancelled query
@@ -3171,7 +3173,7 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
         ci->isLoaddataInfile = true;
     }
 
-    if (is_cache_insert)
+    if (is_cache_insert && (thd->lex)->sql_command != SQLCOM_INSERT_SELECT)
     {
         ci->isCacheInsert = true;
 
@@ -3184,7 +3186,7 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
     if ((((thd->lex)->sql_command == SQLCOM_INSERT) ||
             ((thd->lex)->sql_command == SQLCOM_LOAD) ||
             (thd->lex)->sql_command == SQLCOM_INSERT_SELECT ||
-            is_cache_insert) && !ci->singleInsert )
+            ci->isCacheInsert) && !ci->singleInsert )
     {
         ci->useCpimport = get_use_import_for_batchinsert(thd);
 
@@ -3192,7 +3194,7 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
             ci->useCpimport = 0;
 
         // For now, disable cpimport for cache inserts
-        if (is_cache_insert)
+        if (ci->isCacheInsert)
             ci->useCpimport = 0;
 
         // ci->useCpimport = 2 means ALWAYS use cpimport, whether it's in a
@@ -3211,7 +3213,7 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
 
             try
             {
-                colrids = csc->columnRIDs(tableName);
+                colrids = csc->columnRIDs(tableName, false, lower_case_table_names);
             }
             catch (IDBExcept& ie)
             {
@@ -3225,6 +3227,11 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
             }
 
             ci->useXbit = table->s->db_options_in_use & HA_OPTION_PACK_RECORD;
+
+            // TODO: This needs a proper fix.
+            if (is_cache_insert)
+                ci->useXbit = false;
+
             //@bug 6122 Check how many columns have not null constraint. columnn with not null constraint will not show up in header.
             unsigned int numberNotNull = 0;
 
@@ -3551,7 +3558,7 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
     }
 
     //Save table oid for commit to use
-    if ( ( ((thd->lex)->sql_command == SQLCOM_INSERT) ||  ((thd->lex)->sql_command == SQLCOM_LOAD) || (thd->lex)->sql_command == SQLCOM_INSERT_SELECT) || is_cache_insert)
+    if ( ( ((thd->lex)->sql_command == SQLCOM_INSERT) ||  ((thd->lex)->sql_command == SQLCOM_LOAD) || (thd->lex)->sql_command == SQLCOM_INSERT_SELECT) || ci->isCacheInsert)
     {
         // query stats. only collect execution time and rows inserted for insert/load_data_infile
         ci->stats.reset();
@@ -3617,7 +3624,7 @@ void ha_mcs_impl_start_bulk_insert(ha_rows rows, TABLE* table, bool is_cache_ins
 
         try
         {
-            CalpontSystemCatalog::ROPair roPair = csc->tableRID( tableName );
+            CalpontSystemCatalog::ROPair roPair = csc->tableRID(tableName, lower_case_table_names);
             ci->tableOid = roPair.objnum;
         }
         catch (IDBExcept& ie)
@@ -4082,7 +4089,7 @@ COND* ha_mcs_impl_cond_push(COND* cond, TABLE* table, std::vector<COND*>& condSt
     return cond;
 }
 
-int ha_mcs_impl_external_lock(THD* thd, TABLE* table, int lock_type)
+int ha_mcs::impl_external_lock(THD* thd, TABLE* table, int lock_type)
 {
     // @bug 3014. Error out locking table command. IDB does not support it now.
     if (thd->lex->sql_command == SQLCOM_LOCK_TABLES)
@@ -4111,6 +4118,7 @@ int ha_mcs_impl_external_lock(THD* thd, TABLE* table, int lock_type)
         return 0;
     }
 
+    m_lock_type= lock_type;
 
     CalTableMap::iterator mapiter = ci->tableMap.find(table);
     // make sure this is a release lock (2nd) call called in
@@ -4356,7 +4364,7 @@ int ha_mcs_impl_group_by_init(mcs_handler_info *handler_info, TABLE* table)
         csep->sessionID(sessionID);
 
         if (group_hand->table_list->db.length)
-            csep->schemaName(group_hand->table_list->db.str);
+            csep->schemaName(group_hand->table_list->db.str, lower_case_table_names);
 
         csep->traceFlags(ci->traceFlags);
 
@@ -4692,7 +4700,6 @@ int ha_mcs_impl_group_by_next(TABLE* table)
                 thd->lex->sql_command == SQLCOM_LOAD))
         return 0;
 
-    // @bug 3078
     if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD)
     {
         force_close_fep_conn(thd, ci);
@@ -4787,11 +4794,7 @@ int ha_mcs_impl_group_by_end(TABLE* table)
         ci = reinterpret_cast<cal_connection_info*>(get_fe_conn_info_ptr());
     }
 
-    // @bug 3078. Also session limit variable works the same as ctrl+c
-    if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD ||
-            ((thd->lex)->sql_command != SQLCOM_INSERT &&
-             (thd->lex)->sql_command != SQLCOM_INSERT_SELECT &&
-             thd->variables.select_limit != (uint64_t) - 1))
+    if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD)
     {
         force_close_fep_conn(thd, ci);
         // clear querystats because no query stats available for cancelled query
@@ -4932,7 +4935,7 @@ int ha_mcs_impl_group_by_end(TABLE* table)
  * RETURN:
  *    rc as int
  ***********************************************************/
-int ha_cs_impl_pushdown_init(mcs_handler_info* handler_info, TABLE* table)
+int ha_mcs_impl_pushdown_init(mcs_handler_info* handler_info, TABLE* table)
 {
     IDEBUG( cout << "pushdown_init for table " << endl );
     THD* thd = current_thd;
@@ -5116,7 +5119,7 @@ int ha_cs_impl_pushdown_init(mcs_handler_info* handler_info, TABLE* table)
             csep->sessionID(sessionID);
 
             if (thd->db.length)
-                csep->schemaName(thd->db.str);
+                csep->schemaName(thd->db.str, lower_case_table_names);
 
             csep->traceFlags(ci->traceFlags);
 
@@ -5384,7 +5387,7 @@ internal_error:
     return ER_INTERNAL_ERROR;
 }
 
-int ha_cs_impl_select_next(uchar* buf, TABLE* table)
+int ha_mcs_impl_select_next(uchar* buf, TABLE* table)
 {
     int rc = HA_ERR_END_OF_FILE;
     THD* thd = current_thd;
@@ -5414,7 +5417,6 @@ int ha_cs_impl_select_next(uchar* buf, TABLE* table)
     //    if (MIGR::infinidb_vtable.impossibleWhereOnUnion)
     //        return HA_ERR_END_OF_FILE;
 
-        // @bug 3078
     if (thd->killed == KILL_QUERY || thd->killed == KILL_QUERY_HARD)
     {
         force_close_fep_conn(thd, ci);

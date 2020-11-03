@@ -129,19 +129,34 @@ trx_undo_log_v_idx(
 {
 	ut_ad(pos < table->n_v_def);
 	dict_v_col_t*	vcol = dict_table_get_nth_v_col(table, pos);
-	ulint		n_idx = vcol->n_v_indexes;
 	byte*		old_ptr;
 
-	ut_ad(n_idx > 0);
+	ut_ad(!vcol->v_indexes.empty());
 
 	/* Size to reserve, max 5 bytes for each index id and position, plus
 	5 bytes for num of indexes, 2 bytes for write total length.
 	1 byte for undo log record format version marker */
-	ulint		size = n_idx * (5 + 5) + 5 + 2 + (first_v_col ? 1 : 0);
+	ulint		size = 5 + 2 + (first_v_col ? 1 : 0);
+	const ulint	avail = trx_undo_left(undo_block, ptr);
 
-	if (trx_undo_left(undo_block, ptr) < size) {
+	if (avail < size) {
 		return(NULL);
 	}
+
+	size = 0;
+	ulint n_idx = 0;
+	for (const auto& v_index : vcol->v_indexes) {
+		n_idx++;
+		/* FIXME: index->id is 64 bits! */
+		size += mach_get_compressed_size(uint32_t(v_index.index->id));
+		size += mach_get_compressed_size(v_index.nth_field);
+	}
+	size += 2 + mach_get_compressed_size(n_idx);
+
+	if (avail < size) {
+		return(NULL);
+	}
+
 
 	if (first_v_col) {
 		/* write the version marker */
@@ -158,7 +173,8 @@ trx_undo_log_v_idx(
 
 	for (const auto& v_index : vcol->v_indexes) {
 		ptr += mach_write_compressed(
-			ptr, static_cast<ulint>(v_index.index->id));
+			/* FIXME: index->id is 64 bits! */
+			ptr, uint32_t(v_index.index->id));
 
 		ptr += mach_write_compressed(ptr, v_index.nth_field);
 	}
@@ -1896,8 +1912,6 @@ dberr_t trx_undo_report_rename(trx_t* trx, const dict_table_t* table)
 
 			if (uint16_t offset = trx_undo_page_report_rename(
 				    trx, table, block, &mtr)) {
-				undo->withdraw_clock
-					= buf_pool.withdraw_clock();
 				undo->top_page_no = undo->last_page_no;
 				undo->top_offset  = offset;
 				undo->top_undo_no = trx->undo_no++;
@@ -2040,12 +2054,26 @@ trx_undo_report_row_operation(
 
 				err = DB_UNDO_RECORD_TOO_BIG;
 				goto err_exit;
+			} else {
+				/* Write log for clearing the unused
+				tail of the undo page. It might
+				contain some garbage from a previously
+				written record, and mtr_t::write()
+				will optimize away writes of unchanged
+				bytes. Failure to write this caused a
+				recovery failure when we avoided
+				reading the undo log page from the
+				data file and initialized it based on
+				redo log records (which included the
+				write of the previous garbage). */
+				mtr.memset(*undo_block, first_free,
+					   srv_page_size - first_free
+					   - FIL_PAGE_DATA_END, 0);
 			}
 
 			mtr_commit(&mtr);
 		} else {
 			/* Success */
-			undo->withdraw_clock = buf_pool.withdraw_clock();
 			mtr_commit(&mtr);
 
 			undo->top_page_no = undo_block->page.id().page_no();
@@ -2364,7 +2392,11 @@ trx_undo_prev_version_build(
 		/* The page containing the clustered index record
 		corresponding to entry is latched in mtr.  Thus the
 		following call is safe. */
-		row_upd_index_replace_new_col_vals(entry, index, update, heap);
+		if (!row_upd_index_replace_new_col_vals(entry, *index, update,
+							heap)) {
+			ut_a(v_status & TRX_UNDO_PREV_IN_PURGE);
+			return false;
+		}
 
 		/* Get number of externally stored columns in updated record */
 		const ulint n_ext = index->is_primary()

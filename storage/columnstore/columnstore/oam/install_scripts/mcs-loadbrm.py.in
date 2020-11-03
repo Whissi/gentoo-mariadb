@@ -3,20 +3,21 @@ import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-
+import time
 import configparser
+import os
+import glob
+import shutil
 
-
-api_config_file = '/etc/columnstore/cmapi_server.conf'
+API_CONFIG_PATH = '/etc/columnstore/cmapi_server.conf'
+BYPASS_SM_PATH = '/tmp/columnstore_tmp_files/rdwrscratch/BRM_saves'
+USER = 'mysql'
+GROUP = 'mysql'
 
 
 def get_key():
     cmapi_config = configparser.ConfigParser()
-    try:
-        cmapi_config.read(api_config_file)
-    except FileNotFoundError:
-        return ''
-
+    cmapi_config.read(API_CONFIG_PATH)
     if 'Authentication' not in cmapi_config.sections():
         return ''
     return cmapi_config['Authentication'].get('x-api-key', '')
@@ -31,6 +32,10 @@ def get_port():
 
 
 if __name__ == '__main__':
+    # To avoid systemd in container environment
+    use_systemd = True
+    if len(sys.argv) > 1:
+        use_systemd = not sys.argv[1] == 'no'
     sm_config = configparser.ConfigParser()
 
     sm_config.read('/etc/columnstore/storagemanager.cnf')
@@ -45,18 +50,21 @@ if __name__ == '__main__':
         bucket = 'some_bucket'
 
     dbrmroot = config_root.find('./SystemConfig/DBRMRoot').text
-    loadbrm = '/usr/bin/load_brm'
+    pmCount = int(config_root.find('./SystemModuleConfig/ModuleCount3').text)
+    loadbrm = '@ENGINE_BINDIR@/load_brm'
 
     brm_saves_current = ''
 
     if storage.lower() == 's3' and not bucket.lower() == 'some_bucket':
-        # load s3
-        cmd = 'systemctl start mcs-storagemanager'
-        retcode = subprocess.call(cmd, shell=True)
-        if retcode < 0:
-            print('Failed to start storagemanager. \
+        # start SM using systemd
+        if use_systemd is True:
+            cmd = 'systemctl start mcs-storagemanager'
+            retcode = subprocess.call(cmd, shell=True)
+            if retcode < 0:
+                print('Failed to start storagemanager. \
 {} exits with {}.'.format(cmd, retcode))
-            sys.exit(1)
+                sys.exit(1)
+            time.sleep(1)   # allow SM time to init
 
         brm = 'data1/systemFiles/dbrm/BRM_saves_current'
         config_root.find('./Installation/DBRootStorageType').text = "StorageManager"
@@ -66,19 +74,27 @@ if __name__ == '__main__':
             config_root.find('./SystemConfig').append(ET.Element("DataFilePlugin"))
 
         config_root.find('./SystemConfig/DataFilePlugin').text = "libcloudio.so"
-        cs_config.write('/etc/columnstore/Columnstore.xml')
+        
+        cs_config.write('/etc/columnstore/Columnstore.xml.loadbrm')
+        os.replace('/etc/columnstore/Columnstore.xml.loadbrm',
+                   '/etc/columnstore/Columnstore.xml')    # atomic replacement
 
+    # Single-node on S3
+    if storage.lower() == 's3' and not bucket.lower() == 'some_bucket' and pmCount == 1:
         try:
-            brm_saves_current = subprocess.check_output(['smcat', brm])
+            if use_systemd:
+                args = ['su', '-s', '/bin/sh', '-c', 'smcat {}'.format(brm), 'mysql']
+            else:
+                args = ['smcat', brm]
+
+            brm_saves_current = subprocess.check_output(args)
         except subprocess.CalledProcessError as e:
             # will happen when brm file does not exist
             print('{} does not exist.'.format(brm), file=sys.stderr)
     else:
-        pmCount = int(config_root.find('./SystemModuleConfig/ModuleCount3').text)
         brm = '{}_current'.format(dbrmroot)
-
+        # Multi-node
         if pmCount > 1:
-            # load multinode dbrm
             try:
                 import requests
                 requests.packages.urllib3.disable_warnings()
@@ -90,7 +106,7 @@ Please install CMAPI first.', file=sys.stderr)
                 primary_address = config_root.find('./DBRM_Controller/IPAddr').text
                 api_key = get_key()
                 if len(api_key) == 0:
-                    print('Failed to find API key in {}.'.format(api_config_file), \
+                    print('Failed to find API key in {}.'.format(API_CONFIG_PATH), \
 file=sys.stderr)
                     sys.exit(1)
                 headers = {'x-api-key': api_key}
@@ -101,16 +117,29 @@ file=sys.stderr)
                     print("Pulling {} from the primary node.".format(e))
                     url = "https://{}:{}/cmapi/{}/node/meta/{}".format(primary_address, \
 api_port, api_version, e)
-                    r = requests.get(url, verify=False, headers=headers, timeout=2)
+                    r = requests.get(url, verify=False, headers=headers, timeout=30)
                     if (r.status_code != 200):
                         raise RuntimeError("Error requesting {} from the primary \
 node.".format(e))
+
+                    # To avoid SM storing BRM files
+                    if storage.lower() == 's3' and bucket.lower() != 'some_bucket':
+                        dbrmroot = BYPASS_SM_PATH
+
+                        if not os.path.exists(dbrmroot):
+                            os.makedirs(dbrmroot)
+                            if use_systemd:
+                                shutil.chown(dbrmroot, USER, GROUP)
+
                     current_name = '{}_{}'.format(dbrmroot, e)
+
                     print ("Saving {} to {}".format(e, current_name))
                     path = Path(current_name)
                     path.write_bytes(r.content)
-            except:
-                print('Failed to load meta data from the primary \
+                    shutil.chown(current_name, USER, GROUP)
+            except Exception as e:
+                print(str(e))
+                print('Failed to load BRM data from the primary \
 node {}.'.format(primary_address), file=sys.stderr)
                 sys.exit(1)
 
@@ -124,12 +153,19 @@ node {}.'.format(primary_address), file=sys.stderr)
                 print('{} does not exist.'.format(brm), file=sys.stderr)
 
     if brm_saves_current:
-        cmd = '{} {}{}'.format(loadbrm, dbrmroot, \
+        if use_systemd:
+            cmd = 'su -s /bin/sh -c "{} {}{}" mysql'.format(loadbrm, dbrmroot, \
+brm_saves_current.decode("utf-8").replace("BRM_saves", ""))
+        else:
+            cmd = '{} {}{}'.format(loadbrm, dbrmroot, \
 brm_saves_current.decode("utf-8").replace("BRM_saves", ""))
         try:
             retcode = subprocess.call(cmd, shell=True)
             if retcode < 0:
                 print('{} exits with {}.'.format(cmd, retcode))
                 sys.exit(1)
+            if use_systemd:
+                for shm_file in glob.glob('/dev/shm/*'):                
+                    shutil.chown(shm_file, USER, GROUP)
         except OSError as e:
             sys.exit(1)

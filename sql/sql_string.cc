@@ -183,6 +183,17 @@ bool Binary_string::set_hex(const char *str, uint32 len)
 }
 
 
+bool Binary_string::set_fcvt(double num, uint decimals)
+{
+  // Assert that `decimals` is small enough to fit into FLOATING_POINT_BUFFER
+  DBUG_ASSERT(decimals < DECIMAL_NOT_SPECIFIED);
+  if (alloc(FLOATING_POINT_BUFFER))
+    return true;
+  length(my_fcvt(num, decimals, Ptr, NULL));
+  return false;
+}
+
+
 bool String::set_real(double num,uint decimals, CHARSET_INFO *cs)
 {
   char buff[FLOATING_POINT_BUFFER];
@@ -756,10 +767,10 @@ void Static_binary_string::qs_append(double d)
                        NULL);
 }
 
-void Static_binary_string::qs_append(double *d)
+void Static_binary_string::qs_append(const double *d)
 {
   double ld;
-  float8get(ld, (char*) d);
+  float8get(ld, (const char*) d);
   qs_append(ld);
 }
 
@@ -847,7 +858,7 @@ int sortcmp(const String *s,const String *t, CHARSET_INFO *cs)
 int stringcmp(const String *s,const String *t)
 {
   uint32 s_len=s->length(),t_len=t->length(),len=MY_MIN(s_len,t_len);
-  int cmp= memcmp(s->ptr(), t->ptr(), len);
+  int cmp= len ? memcmp(s->ptr(), t->ptr(), len) : 0;
   return (cmp) ? cmp : (int) (s_len - t_len);
 }
 

@@ -1346,6 +1346,20 @@ create table t1 ( id serial );
 show create table t1;
 drop table t1;
 
+#
+# BETWEEN syntax
+#
+create or replace view v1 as select 1 between (2 between 3 and 4) and 5;
+Select view_definition from information_schema.views where table_schema='test' and table_name='v1';
+create or replace view v1 as select 1 between (2 in (3,4)) and 5;
+Select view_definition from information_schema.views where table_schema='test' and table_name='v1';
+create or replace view v1 as select 1 between (2 like 3) and 4;
+Select view_definition from information_schema.views where table_schema='test' and table_name='v1';
+create or replace view v1 as select 1 not between (2 like 3) and 4;
+Select view_definition from information_schema.views where table_schema='test' and table_name='v1';
+
+drop view v1;
+
 --echo #
 --echo # MDEV-10343 Providing compatibility for basic SQL data types
 --echo #
@@ -1543,7 +1557,16 @@ SELECT @@GLOBAL.password;
 --error ER_UNKNOWN_SYSTEM_VARIABLE
 SELECT @@GLOBAL.role;
 
---echo End of 10.3 tests
+--echo #
+--echo # MDEV-22022 Various mangled SQL statements will crash 10.3 to 10.5 debug builds
+--echo #
+
+--error ER_PARSE_ERROR
+EXECUTE IMMEDIATE 'if(`systeminfo /FO LIST';
+--error ER_PARSE_ERROR
+EXECUTE IMMEDIATE 'if(`systeminfo';
+
+--echo # End of 10.3 tests
 
 --echo #
 --echo # MDEV-19540: 10.4 allow lock options with SELECT in brackets
@@ -1688,6 +1711,103 @@ DELIMITER ;$$
 KILL ( SELECT 1 ) + LASTVAL(s);
 --error ER_SUBQUERIES_NOT_SUPPORTED
 KILL LASTVAL(s);
+
+--echo #
+--echo # MDEV-23094: Multiple calls to a Stored Procedure from another
+--echo # Stored Procedure crashes server
+--echo #
+
+create table t1 (id1 int primary key, data1 int);
+create table t2 (id2 int primary key, data2 int);
+
+delimiter //;
+create procedure p1(IN id int, IN dt int)
+begin
+  if (exists(select * from t1 where id1 = id and data1 = dt) or
+      not exists (select * from t2 where id2 = id and data2 = dt))
+  then
+      select 1;
+  end if;
+end //
+delimiter ;//
+
+call p1(1,2);
+call p1(1,2);
+
+drop procedure p1;
+
+delimiter //;
+create procedure p1(IN id int, IN dt int)
+begin
+case (exists(select * from t1 where id1 = id and data1 = dt) or
+      not exists (select * from t2 where id2 = id and data2 = dt))
+when 1 then
+  select 1;
+else
+  select 0;
+end case;
+end //
+delimiter ;//
+
+call p1(1,2);
+call p1(1,2);
+
+drop procedure p1;
+
+delimiter //;
+create procedure p1(IN id int, IN dt int)
+begin
+declare wcont int default 1;
+while (exists(select * from t1 where id1 = id and data1 = dt) or
+      not exists (select * from t2 where id2 = id and data2 = dt)) and wcont
+do
+  select 1;
+  set wcont=0;
+end while;
+end //
+delimiter ;//
+
+call p1(1,2);
+call p1(1,2);
+
+drop procedure p1;
+
+delimiter //;
+create procedure p1(IN id int, IN dt int)
+begin
+declare count int default 1;
+repeat
+  select 1;
+  set count=count+1;
+until (exists(select * from t1 where id1 = id and data1 = dt) or
+      not exists (select * from t2 where id2 = id and data2 = dt)) and
+      count < 3
+end repeat;
+end //
+delimiter ;//
+
+call p1(1,2);
+call p1(1,2);
+
+drop procedure p1;
+
+delimiter //;
+create procedure p1(IN id int, IN dt int)
+begin
+for i in 1..(exists(select * from t1 where id1 = id and data1 = dt) or
+             not exists (select * from t2 where id2 = id and data2 = dt))
+do
+  select 1;
+end for;
+end //
+delimiter ;//
+
+call p1(1,2);
+call p1(1,2);
+
+drop procedure p1;
+
+drop table t1,t2;
 
 --echo # End of 10.4 tests
 

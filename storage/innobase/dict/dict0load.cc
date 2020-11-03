@@ -897,7 +897,7 @@ dict_update_filepath(
 
 	trx_commit_for_mysql(trx);
 	trx->dict_operation_lock_mode = 0;
-	trx_free(trx);
+	trx->free();
 
 	if (UNIV_LIKELY(err == DB_SUCCESS)) {
 		/* We just updated SYS_DATAFILES due to the contents in
@@ -958,7 +958,7 @@ dict_replace_tablespace_and_filepath(
 
 	trx_commit_for_mysql(trx);
 	trx->dict_operation_lock_mode = 0;
-	trx_free(trx);
+	trx->free();
 
 	return(err);
 }
@@ -2632,7 +2632,7 @@ static const char* dict_load_table_low(const table_name_t& name,
 		name.m_name, NULL, n_cols + n_v_col, n_v_col, flags, flags2);
 	(*table)->space_id = space_id;
 	(*table)->id = table_id;
-	(*table)->file_unreadable = false;
+	(*table)->file_unreadable = !!(flags2 & DICT_TF2_DISCARDED);
 
 	return(NULL);
 }
@@ -2686,28 +2686,22 @@ dict_get_and_save_data_dir_path(
 	ut_ad(!table->is_temporary());
 	ut_ad(!table->space || table->space->id == table->space_id);
 
-	if (!table->data_dir_path && table->space_id) {
+	if (!table->data_dir_path && table->space_id && table->space) {
 		if (!dict_mutex_own) {
 			dict_mutex_enter_for_mysql();
 		}
 
-		if (const char* p = table->space
-		    ? table->space->chain.start->name : NULL) {
-			table->flags |= 1 << DICT_TF_POS_DATA_DIR
-				& ((1U << DICT_TF_BITS) - 1);
-			dict_save_data_dir_path(table, p);
-		} else if (char* path = dict_get_first_path(table->space_id)) {
-			table->flags |= 1 << DICT_TF_POS_DATA_DIR
-				& ((1U << DICT_TF_BITS) - 1);
-			dict_save_data_dir_path(table, path);
-			ut_free(path);
-		}
+		table->flags |= 1 << DICT_TF_POS_DATA_DIR
+			& ((1U << DICT_TF_BITS) - 1);
+		dict_save_data_dir_path(table,
+					table->space->chain.start->name);
 
 		if (table->data_dir_path == NULL) {
 			/* Since we did not set the table data_dir_path,
 			unset the flag.  This does not change SYS_DATAFILES
-			or SYS_TABLES or FSP_FLAGS on the header page of the
-			tablespace, but it makes dict_table_t consistent. */
+			or SYS_TABLES or FSP_SPACE_FLAGS on the header page
+			of the tablespace, but it makes dict_table_t
+			consistent. */
 			table->flags &= ~DICT_TF_MASK_DATA_DIR
 				& ((1U << DICT_TF_BITS) - 1);
 		}
@@ -2981,15 +2975,15 @@ err_exit:
 	}
 
 	if (err == DB_SUCCESS && table->is_readable()) {
-		if (table->space && !fil_space_get_size(table->space_id)) {
+		const auto root = dict_table_get_first_index(table)->page;
+
+		if (root >= table->space->get_size()) {
 corrupted:
 			table->corrupted = true;
 			table->file_unreadable = true;
 			err = DB_CORRUPTION;
 		} else {
-			const page_id_t page_id(
-				table->space->id,
-				dict_table_get_first_index(table)->page);
+			const page_id_t page_id(table->space->id, root);
 			mtr.start();
 			buf_block_t* block = buf_page_get(
 				page_id, table->space->zip_size(),

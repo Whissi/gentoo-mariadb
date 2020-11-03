@@ -98,6 +98,15 @@ static MYSQL_THDVAR_BOOL(
     1
 );
 
+static MYSQL_THDVAR_BOOL(
+    select_handler_in_stored_procedures,
+    PLUGIN_VAR_NOCMDARG,
+    "Enable/Disable the MCS select_handler for Stored Procedures",
+    NULL,
+    NULL,
+    1
+);
+
 static MYSQL_THDVAR_UINT(
     orderby_threads,
     PLUGIN_VAR_RQCMDARG,
@@ -303,6 +312,27 @@ static MYSQL_THDVAR_BOOL(
     0
 );
 
+static MYSQL_THDVAR_BOOL(
+    cache_inserts,
+    PLUGIN_VAR_NOCMDARG | PLUGIN_VAR_READONLY,
+    "Perform cache-based inserts to ColumnStore",
+    NULL,
+    NULL,
+    0
+);
+
+static MYSQL_THDVAR_ULONGLONG(
+    cache_flush_threshold,
+    PLUGIN_VAR_RQCMDARG,
+    "Threshold on the number of rows in the cache to trigger a flush",
+    NULL,
+    NULL,
+    500000,
+    1,
+    1000000000,
+    1
+);
+
 st_mysql_sys_var* mcs_system_variables[] =
 {
   MYSQL_SYSVAR(compression_type),
@@ -311,6 +341,7 @@ st_mysql_sys_var* mcs_system_variables[] =
   MYSQL_SYSVAR(select_handler),
   MYSQL_SYSVAR(derived_handler),
   MYSQL_SYSVAR(group_by_handler),
+  MYSQL_SYSVAR(select_handler_in_stored_procedures),
   MYSQL_SYSVAR(orderby_threads),
   MYSQL_SYSVAR(decimal_scale),
   MYSQL_SYSVAR(use_decimal_scale),
@@ -328,6 +359,8 @@ st_mysql_sys_var* mcs_system_variables[] =
   MYSQL_SYSVAR(import_for_batchinsert_enclosed_by),
   MYSQL_SYSVAR(varbin_always_hex),
   MYSQL_SYSVAR(replication_slave),
+  MYSQL_SYSVAR(cache_inserts),
+  MYSQL_SYSVAR(cache_flush_threshold),
   NULL
 };
 
@@ -394,6 +427,16 @@ bool get_group_by_handler(THD* thd)
 void set_group_by_handler(THD* thd, bool value)
 {
     THDVAR(thd, group_by_handler) = value;
+}
+
+bool get_select_handler_in_stored_procedures(THD* thd)
+{
+    return ( thd == NULL ) ? false :
+        THDVAR(thd, select_handler_in_stored_procedures);
+}
+void set_select_handler_in_stored_procedures(THD* thd, bool value)
+{
+    THDVAR(thd, select_handler_in_stored_procedures) = value;
 }
 
 void set_compression_type(THD* thd, ulong value)
@@ -558,4 +601,23 @@ bool get_replication_slave(THD* thd)
 void set_replication_slave(THD* thd, bool value)
 {
     THDVAR(thd, replication_slave) = value;
+}
+
+bool get_cache_inserts(THD* thd)
+{
+    return ( thd == NULL ) ? false : THDVAR(thd, cache_inserts);
+}
+void set_cache_inserts(THD* thd, bool value)
+{
+    THDVAR(thd, cache_inserts) = value;
+}
+
+ulonglong get_cache_flush_threshold(THD* thd)
+{
+    return ( thd == NULL ) ? 500000 : THDVAR(thd, cache_flush_threshold);
+}
+
+void set_cache_flush_threshold(THD* thd, ulonglong value)
+{
+    THDVAR(thd, cache_flush_threshold) = value;
 }

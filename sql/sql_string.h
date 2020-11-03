@@ -314,7 +314,8 @@ public:
   }
   void q_append(const char *data, size_t data_len)
   {
-    memcpy(Ptr + str_length, data, data_len);
+    if (data_len)
+      memcpy(Ptr + str_length, data, data_len);
     DBUG_ASSERT(str_length <= UINT_MAX32 - data_len);
     str_length += (uint)data_len;
   }
@@ -345,7 +346,7 @@ public:
   void qs_append(const char *str, size_t len);
   void qs_append_hex(const char *str, uint32 len);
   void qs_append(double d);
-  void qs_append(double *d);
+  void qs_append(const double *d);
   inline void qs_append(const char c)
   {
      Ptr[str_length]= c;
@@ -524,6 +525,7 @@ public:
 
   bool set_hex(ulonglong num);
   bool set_hex(const char *str, uint32 len);
+  bool set_fcvt(double num, uint decimals);
 
   bool copy();                                  // Alloc string if not alloced
   bool copy(const Binary_string &s);            // Allocate new string
@@ -781,6 +783,11 @@ public:
   bool set(longlong num, CHARSET_INFO *cs) { return set_int(num, false, cs); }
   bool set(ulonglong num, CHARSET_INFO *cs) { return set_int((longlong)num, true, cs); }
   bool set_real(double num,uint decimals, CHARSET_INFO *cs);
+  bool set_fcvt(double num, uint decimals)
+  {
+    set_charset(&my_charset_latin1);
+    return Binary_string::set_fcvt(num, decimals);
+  }
 
   bool set_hex(ulonglong num)
   {

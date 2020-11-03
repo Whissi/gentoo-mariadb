@@ -1893,13 +1893,10 @@ extern "C" void unireg_abort(int exit_code)
     WSREP_INFO("Some threads may fail to exit.");
   }
 
-  if (WSREP_ON)
+  if (WSREP_ON && wsrep_inited)
   {
-    /* In bootstrap mode we deinitialize wsrep here. */
-    if (opt_bootstrap || wsrep_recovery)
-    {
-      if (wsrep_inited) wsrep_deinit(true);
-    }
+    wsrep_deinit(true);
+    wsrep_deinit_server();
   }
 #endif // WITH_WSREP
 
@@ -2526,6 +2523,11 @@ static void network_init(void)
 #endif
   }
 #endif
+
+#ifdef _WIN32
+  network_init_win();
+#endif
+
   DBUG_PRINT("info",("server started"));
   DBUG_VOID_RETURN;
 }
@@ -2548,7 +2550,7 @@ void close_connection(THD *thd, uint sql_errno)
 
   if (sql_errno)
   {
-    net_send_error(thd, sql_errno, ER_DEFAULT(sql_errno), NULL);
+    thd->protocol->net_send_error(thd, sql_errno, ER_DEFAULT(sql_errno), NULL);
     thd->print_aborted_warning(lvl, ER_DEFAULT(sql_errno));
   }
   else
@@ -2825,7 +2827,6 @@ void init_signals(void)
     sigemptyset(&sa.sa_mask);
     sigprocmask(SIG_SETMASK,&sa.sa_mask,NULL);
 
-    my_init_stacktrace(0);
 #if defined(__amiga__)
     sa.sa_handler=(void(*)())handle_fatal_signal;
 #else
@@ -3562,7 +3563,8 @@ static const char *rpl_make_log_name(PSI_memory_key key, const char *opt,
                                      const char *def, const char *ext)
 {
   DBUG_ENTER("rpl_make_log_name");
-  DBUG_PRINT("enter", ("opt: %s, def: %s, ext: %s", opt, def, ext));
+  DBUG_PRINT("enter", ("opt: %s, def: %s, ext: %s", opt ? opt : "(null)",
+                       def, ext));
   char buff[FN_REFLEN];
   const char *base= opt ? opt : def;
   unsigned int options=
@@ -6746,11 +6748,11 @@ struct my_option my_long_options[]=
   {"temp-pool", 0,
 #if (ENABLE_TEMP_POOL)
    "Using this option will cause most temporary files created to use a small "
-   "set of names, rather than a unique name for each new file.",
+   "set of names, rather than a unique name for each new file. Deprecated.",
 #else
    "This option is ignored on this OS.",
 #endif
-   &use_temp_pool, &use_temp_pool, 0, GET_BOOL, NO_ARG, 1,
+   &use_temp_pool, &use_temp_pool, 0, GET_BOOL, NO_ARG, 0,
    0, 0, 0, 0, 0},
   {"transaction-isolation", 0,
    "Default transaction isolation level",
@@ -7163,8 +7165,8 @@ show_ssl_get_server_not_after(THD *thd, SHOW_VAR *var, char *buff,
 
 #endif /* HAVE_OPENSSL && !EMBEDDED_LIBRARY */
 
-static int show_default_keycache(THD *thd, SHOW_VAR *var, char *buff,
-                                 enum enum_var_type scope)
+static int show_default_keycache(THD *thd, SHOW_VAR *var, void *buff,
+                                 system_status_var *, enum_var_type)
 {
   struct st_data {
     KEY_CACHE_STATISTICS stats;
@@ -7197,7 +7199,7 @@ static int show_default_keycache(THD *thd, SHOW_VAR *var, char *buff,
 
   v->name= 0;
 
-  DBUG_ASSERT((char*)(v+1) <= buff + SHOW_VAR_FUNC_BUFF_SIZE);
+  DBUG_ASSERT((char*)(v+1) <= static_cast<char*>(buff) + SHOW_VAR_FUNC_BUFF_SIZE);
 
 #undef set_one_keycache_var
 
@@ -7221,8 +7223,8 @@ static int show_memory_used(THD *thd, SHOW_VAR *var, char *buff,
 
 
 #ifndef DBUG_OFF
-static int debug_status_func(THD *thd, SHOW_VAR *var, char *buff,
-                             enum enum_var_type scope)
+static int debug_status_func(THD *thd, SHOW_VAR *var, void *buff,
+                             system_status_var *, enum_var_type)
 {
 #define add_var(X,Y,Z)                  \
   v->name= X;                           \

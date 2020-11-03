@@ -141,12 +141,9 @@ struct i_s_table_cache_t {
 struct trx_i_s_cache_t {
 	rw_lock_t	rw_lock;	/*!< read-write lock protecting
 					the rest of this structure */
-	ulonglong	last_read;	/*!< last time the cache was read;
+	Atomic_relaxed<ulonglong> last_read;
+					/*!< last time the cache was read;
 					measured in nanoseconds */
-	ib_mutex_t		last_read_mutex;/*!< mutex protecting the
-					last_read member - it is updated
-					inside a shared lock of the
-					rw_lock member */
 	i_s_table_cache_t innodb_trx;	/*!< innodb_trx table */
 	i_s_table_cache_t innodb_locks;	/*!< innodb_locks table */
 	i_s_table_cache_t innodb_lock_waits;/*!< innodb_lock_waits table */
@@ -394,13 +391,11 @@ i_s_locks_row_validate(
 	if (!row->lock_index) {
 		/* table lock */
 		ut_ad(!row->lock_data);
-		ut_ad(!row->lock_space);
-		ut_ad(!row->lock_page);
+		ut_ad(row->lock_page == page_id_t(0, 0));
 		ut_ad(!row->lock_rec);
 	} else {
 		/* record lock */
 		/* row->lock_data == NULL if buf_page_try_get() == NULL */
-		ut_ad(row->lock_page);
 	}
 
 	return(TRUE);
@@ -631,9 +626,7 @@ fill_lock_data(
 
 	mtr_start(&mtr);
 
-	block = buf_page_try_get(page_id_t(lock->un_member.rec_lock.space,
-					   lock->un_member.rec_lock.page_no),
-				 &mtr);
+	block = buf_page_try_get(lock->un_member.rec_lock.page_id, &mtr);
 
 	if (block == NULL) {
 
@@ -754,8 +747,7 @@ static bool fill_locks_row(
 			return false;
 		}
 
-		row->lock_space = lock->un_member.rec_lock.space;
-		row->lock_page = lock->un_member.rec_lock.page_no;
+		row->lock_page = lock->un_member.rec_lock.page_id;
 		row->lock_rec = heap_no;
 
 		if (!fill_lock_data(&row->lock_data, lock, heap_no, cache)) {
@@ -766,8 +758,7 @@ static bool fill_locks_row(
 	} else {
 		row->lock_index = NULL;
 
-		row->lock_space = 0;
-		row->lock_page = 0;
+		row->lock_page = page_id_t(0, 0);
 		row->lock_rec = 0;
 
 		row->lock_data = NULL;
@@ -831,13 +822,9 @@ fold_lock(
 	switch (lock_get_type(lock)) {
 	case LOCK_REC:
 		ut_a(heap_no != 0xFFFF);
-
 		ret = ut_fold_ulint_pair((ulint) lock->trx->id,
-					 lock->un_member.rec_lock.space);
-
-		ret = ut_fold_ulint_pair(ret,
-					 lock->un_member.rec_lock.page_no);
-
+					 lock->un_member.rec_lock.page_id.
+					 fold());
 		ret = ut_fold_ulint_pair(ret, heap_no);
 
 		break;
@@ -880,8 +867,7 @@ locks_row_eq_lock(
 		ut_a(heap_no != 0xFFFF);
 
 		return(row->lock_trx_id == lock->trx->id
-		       && row->lock_space == lock->un_member.rec_lock.space
-		       && row->lock_page == lock->un_member.rec_lock.page_no
+		       && row->lock_page == lock->un_member.rec_lock.page_id
 		       && row->lock_rec == heap_no);
 
 	case LOCK_TABLE:
@@ -1147,8 +1133,7 @@ Checks if the cache can safely be updated.
 @return whether the cache can be updated */
 static bool can_cache_be_updated(trx_i_s_cache_t* cache)
 {
-	/* Here we read cache->last_read without acquiring its mutex
-	because last_read is only updated when a shared rw lock on the
+	/* cache->last_read is only updated when a shared rw lock on the
 	whole cache is being held (see trx_i_s_cache_end_read()) and
 	we are currently holding an exclusive rw lock on the cache.
 	So it is not possible for last_read to be updated while we are
@@ -1280,16 +1265,12 @@ trx_i_s_cache_init(
 	release lock mutex
 	release trx_i_s_cache_t::rw_lock
 	acquire trx_i_s_cache_t::rw_lock, S
-	acquire trx_i_s_cache_t::last_read_mutex
-	release trx_i_s_cache_t::last_read_mutex
 	release trx_i_s_cache_t::rw_lock */
 
 	rw_lock_create(trx_i_s_cache_lock_key, &cache->rw_lock,
 		       SYNC_TRX_I_S_RWLOCK);
 
 	cache->last_read = 0;
-
-	mutex_create(LATCH_ID_CACHE_LAST_READ, &cache->last_read_mutex);
 
 	table_cache_init(&cache->innodb_trx, sizeof(i_s_trx_row_t));
 	table_cache_init(&cache->innodb_locks, sizeof(i_s_locks_row_t));
@@ -1314,7 +1295,6 @@ trx_i_s_cache_free(
 	trx_i_s_cache_t*	cache)	/*!< in, own: cache to free */
 {
 	rw_lock_free(&cache->rw_lock);
-	mutex_free(&cache->last_read_mutex);
 
 	cache->locks_hash.free();
 	ha_storage_free(cache->storage);
@@ -1340,14 +1320,7 @@ trx_i_s_cache_end_read(
 /*===================*/
 	trx_i_s_cache_t*	cache)	/*!< in: cache */
 {
-	ut_ad(rw_lock_own(&cache->rw_lock, RW_LOCK_S));
-
-	/* update cache last read time */
-	const ulonglong now = my_interval_timer();
-	mutex_enter(&cache->last_read_mutex);
-	cache->last_read = now;
-	mutex_exit(&cache->last_read_mutex);
-
+	cache->last_read = my_interval_timer();
 	rw_lock_s_unlock(&cache->rw_lock);
 }
 
@@ -1477,8 +1450,8 @@ trx_i_s_create_lock_id(
 		res_len = snprintf(lock_id, lock_id_size,
 				   TRX_ID_FMT
 				   ":%u:%u:%u",
-				   row->lock_trx_id, row->lock_space,
-				   row->lock_page, row->lock_rec);
+				   row->lock_trx_id, row->lock_page.space(),
+				   row->lock_page.page_no(), row->lock_rec);
 	} else {
 		/* table lock */
 		res_len = snprintf(lock_id, lock_id_size,

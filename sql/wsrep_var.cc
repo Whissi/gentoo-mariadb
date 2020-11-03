@@ -360,6 +360,12 @@ static int wsrep_provider_verify (const char* provider_str)
   {
     return 1;
   }
+
+  if (MY_S_ISDIR(f_stat.st_mode))
+  {
+    return 1;
+  }
+
   return 0;
 }
 
@@ -932,7 +938,8 @@ static void export_wsrep_status_to_mysql(THD* thd)
   mysql_status_vars[wsrep_status_len].type  = SHOW_LONG;
 }
 
-int wsrep_show_status (THD *thd, SHOW_VAR *var, char *buff)
+int wsrep_show_status (THD *thd, SHOW_VAR *var, void *,
+                       system_status_var *, enum_var_type)
 {
   /* Note that we should allow show status like 'wsrep%' even
   when WSREP(thd) is false. */
@@ -941,6 +948,11 @@ int wsrep_show_status (THD *thd, SHOW_VAR *var, char *buff)
     export_wsrep_status_to_mysql(thd);
     var->type= SHOW_ARRAY;
     var->value= (char *) &mysql_status_vars;
+  }
+  else
+  {
+    var->type= SHOW_CHAR;
+    var->value= (char*) "0";
   }
   return 0;
 }

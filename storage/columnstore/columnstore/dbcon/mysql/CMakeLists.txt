@@ -38,9 +38,19 @@ if (COMMAND mysql_add_plugin)
   IF(NOT(RPM OR DEB))
     SET(disabled DISABLED)
   ENDIF()
+  
+  FILE(COPY columnstore.cnf DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/)
+  if (BUILD_CONFIG STREQUAL "enterprise")
+     FILE(RENAME ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/columnstore.cnf ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/x-columnstore.cnf)
+     SET(CS_CNF_FILE "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/x-columnstore.cnf")
+     install(FILES columnstore.cnf DESTINATION ${MARIADB_MYCNFDIR} COMPONENT columnstore-engine)
+   else ()
+     SET(CS_CNF_FILE "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/columnstore.cnf")
+   endif ()
+
   mysql_add_plugin(columnstore ${libcalmysql_SRCS} STORAGE_ENGINE MODULE_ONLY ${disabled}
       LINK_LIBRARIES ${ENGINE_LDFLAGS} ${ENGINE_WRITE_LIBS} ${NETSNMP_LIBRARIES} threadpool
-      COMPONENT columnstore-engine)
+      COMPONENT columnstore-engine CONFIG ${CS_CNF_FILE})
 else ()
     add_library(ha_columnstore SHARED ${libcalmysql_SRCS})
     SET_TARGET_PROPERTIES(ha_columnstore PROPERTIES PREFIX "")
@@ -53,6 +63,8 @@ else ()
     
     # define this dummy target for standalone builds (ie, when mysql_add_plugin doesn't exist)
     add_custom_target(columnstore DEPENDS ha_columnstore) 
+
+    install(FILES columnstore.cnf DESTINATION ${MARIADB_MYCNFDIR} COMPONENT columnstore-engine)
 endif ()
 
 if (TARGET columnstore)
@@ -65,9 +77,4 @@ if (TARGET columnstore)
                   DESTINATION ${ENGINE_SUPPORTDIR} COMPONENT columnstore-engine)
     install(PROGRAMS install_mcs_mysql.sh
         DESTINATION ${ENGINE_SBINDIR} COMPONENT columnstore-engine)
-
-    install(FILES columnstore.cnf
-        DESTINATION ${MARIADB_MYCNFDIR} COMPONENT columnstore-engine)
-    install(FILES x-columnstore.cnf
-        DESTINATION ${MARIADB_MYCNFDIR} COMPONENT columnstore-engine)
 endif()

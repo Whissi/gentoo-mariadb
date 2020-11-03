@@ -26,3 +26,7 @@ char *parse_error_message(const char *data, size_t length);
 
 uint8_t parse_list_response(const char *data, size_t length,
                             struct ms3_list_container_st *list_container, uint8_t list_version, char **continuation);
+
+uint8_t parse_role_list_response(const char *data, size_t length, char *role_name, char* arn, char **continuation);
+
+uint8_t parse_assume_role_response(const char *data, size_t length, char *assume_role_key, char *assume_role_secret, char *assume_role_token);

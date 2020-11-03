@@ -1,4 +1,4 @@
-/* Copyright (c) 2018, MariaDB Corporation
+/* Copyright (c) 2018, 2020, MariaDB Corporation.
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; version 2 of the License.
@@ -96,7 +96,7 @@ bool run_backup_stage(THD *thd, backup_stages stage)
 
   do
   {
-    bool res;
+    bool res= false;
     backup_stages previous_stage= thd->current_backup_stage;
     thd->current_backup_stage= next_stage;
     switch (next_stage) {
@@ -120,7 +120,6 @@ bool run_backup_stage(THD *thd, backup_stages stage)
       break;
     case BACKUP_FINISHED:
       DBUG_ASSERT(0);
-      res= 0;
     }
     if (res)
     {
@@ -379,7 +378,13 @@ bool backup_reset_alter_copy_lock(THD *thd)
 
 bool backup_lock(THD *thd, TABLE_LIST *table)
 {
+  /* We should leave the previous table unlocked in case of errors */
   backup_unlock(thd);
+  if (thd->locked_tables_mode)
+  {
+    my_error(ER_LOCK_OR_ACTIVE_TRANSACTION, MYF(0));
+    return 1;
+  }
   table->mdl_request.duration= MDL_EXPLICIT;
   if (thd->mdl_context.acquire_lock(&table->mdl_request,
                                     thd->variables.lock_wait_timeout))

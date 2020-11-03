@@ -121,7 +121,7 @@ row_sel_sec_rec_is_for_blob(
 		    field_ref_zero, BTR_EXTERN_FIELD_REF_SIZE)) {
 		/* The externally stored field was not written yet.
 		This record should only be seen by
-		recv_recovery_rollback_active() or any
+		trx_rollback_recovered() or any
 		TRX_ISO_READ_UNCOMMITTED transactions. */
 		return(FALSE);
 	}
@@ -156,11 +156,15 @@ fields are compared with collation!
 				must be protected by a page s-latch
 @param[in]	clust_index	clustered index
 @param[in]	thr		query thread
-@return TRUE if the secondary record is equal to the corresponding
-fields in the clustered record, when compared with collation;
-FALSE if not equal or if the clustered record has been marked for deletion */
+@retval	DB_COMPUTE_VALUE_FAILED in case of virtual column value computation
+	failure.
+@retval DB_SUCCESS_LOCKED_REC if the secondary record is equal to the
+	corresponding fields in the clustered record, when compared with
+	collation;
+@retval DB_SUCCESS if not equal or if the clustered record has been marked
+	for deletion */
 static
-ibool
+dberr_t
 row_sel_sec_rec_is_for_clust_rec(
 	const rec_t*	sec_rec,
 	dict_index_t*	sec_index,
@@ -178,9 +182,6 @@ row_sel_sec_rec_is_for_clust_rec(
 	rec_offs	sec_offsets_[REC_OFFS_SMALL_SIZE];
 	rec_offs*	clust_offs	= clust_offsets_;
 	rec_offs*	sec_offs	= sec_offsets_;
-	ibool		is_equal	= TRUE;
-	VCOL_STORAGE*	vcol_storage= 0;
-	byte*		record;
 
 	rec_offs_init(clust_offsets_);
 	rec_offs_init(sec_offsets_);
@@ -195,10 +196,11 @@ row_sel_sec_rec_is_for_clust_rec(
 		it is not visible in the read view.  Besides,
 		if there are any externally stored columns,
 		some of them may have already been purged. */
-		return(FALSE);
+		return DB_SUCCESS;
 	}
 
 	heap = mem_heap_create(256);
+	ib_vcol_row vc(heap);
 
 	clust_offs = rec_get_offsets(clust_rec, clust_index, clust_offs,
 				     true, ULINT_UNDEFINED, &heap);
@@ -227,16 +229,9 @@ row_sel_sec_rec_is_for_clust_rec(
 			dfield_t*		vfield;
 			row_ext_t*		ext;
 
-			if (!vcol_storage)
-			{
-				TABLE *mysql_table= thr->prebuilt->m_mysql_table;
-				innobase_allocate_row_for_vcol(thr_get_trx(thr)->mysql_thd,
-							       clust_index,
-							       &heap,
-							       &mysql_table,
-							       &record,
-							       &vcol_storage);
-			}
+			byte *record = vc.record(thr_get_trx(thr)->mysql_thd,
+						 clust_index,
+						 &thr->prebuilt->m_mysql_table);
 
 			v_col = reinterpret_cast<const dict_v_col_t*>(col);
 
@@ -253,6 +248,10 @@ row_sel_sec_rec_is_for_clust_rec(
 					thr->prebuilt->m_mysql_table,
 					record, NULL, NULL, NULL);
 
+			if (vfield == NULL) {
+				innobase_report_computed_value_failed(row);
+				return DB_COMPUTE_VALUE_FAILED;
+			}
 			clust_len = vfield->len;
 			clust_field = static_cast<byte*>(vfield->data);
 		} else {
@@ -286,7 +285,7 @@ row_sel_sec_rec_is_for_clust_rec(
 					    sec_field, sec_len,
 					    ifield->prefix_len,
 					    clust_index->table)) {
-					goto inequal;
+					return DB_SUCCESS;
 				}
 
 				continue;
@@ -321,28 +320,19 @@ row_sel_sec_rec_is_for_clust_rec(
 			rtr_read_mbr(sec_field, &sec_mbr);
 
 			if (!MBR_EQUAL_CMP(&sec_mbr, &tmp_mbr)) {
-				is_equal = FALSE;
-				goto func_exit;
+				return DB_SUCCESS;
 			}
 		} else {
 
 			if (0 != cmp_data_data(col->mtype, col->prtype,
 					       clust_field, len,
 					       sec_field, sec_len)) {
-inequal:
-				is_equal = FALSE;
-				goto func_exit;
+				return DB_SUCCESS;
 			}
 		}
 	}
 
-func_exit:
-	if (UNIV_LIKELY_NULL(heap)) {
-		if (UNIV_LIKELY_NULL(vcol_storage))
-			innobase_free_row_for_vcol(vcol_storage);
-		mem_heap_free(heap);
-	}
-	return(is_equal);
+	return DB_SUCCESS_LOCKED_REC;
 }
 
 /*********************************************************************//**
@@ -538,7 +528,7 @@ row_sel_fetch_columns(
 				externally stored field was not
 				written yet. This record
 				should only be seen by
-				recv_recovery_rollback_active() or any
+				trx_rollback_recovered() or any
 				TRX_ISO_READ_UNCOMMITTED
 				transactions. The InnoDB SQL parser
 				(the sole caller of this function)
@@ -908,7 +898,7 @@ row_sel_get_clust_rec(
 	dict_index_t*	index;
 	rec_t*		clust_rec;
 	rec_t*		old_vers;
-	dberr_t		err;
+	dberr_t		err		= DB_SUCCESS;
 	mem_heap_t*	heap		= NULL;
 	rec_offs	offsets_[REC_OFFS_NORMAL_SIZE];
 	rec_offs*	offsets		= offsets_;
@@ -950,7 +940,7 @@ row_sel_get_clust_rec(
 		clustered index record did not exist in the read view of
 		trx. */
 
-		goto func_exit;
+		goto err_exit;
 	}
 
 	offsets = rec_get_offsets(clust_rec, index, offsets, true,
@@ -1003,7 +993,7 @@ row_sel_get_clust_rec(
 			clust_rec = old_vers;
 
 			if (clust_rec == NULL) {
-				goto func_exit;
+				goto err_exit;
 			}
 		}
 
@@ -1020,13 +1010,14 @@ row_sel_get_clust_rec(
 		visit through secondary index records that would not really
 		exist in our snapshot. */
 
-		if ((old_vers
-		     || rec_get_deleted_flag(rec, dict_table_is_comp(
-						     plan->table)))
-		    && !row_sel_sec_rec_is_for_clust_rec(rec, plan->index,
-							 clust_rec, index,
-							 thr)) {
-			goto func_exit;
+		if (old_vers || rec_get_deleted_flag(rec, dict_table_is_comp(
+							       plan->table))) {
+			err = row_sel_sec_rec_is_for_clust_rec(rec,
+							plan->index, clust_rec,
+							index, thr);
+			if (err != DB_SUCCESS_LOCKED_REC) {
+				goto err_exit;
+			}
 		}
 	}
 
@@ -1039,7 +1030,6 @@ row_sel_get_clust_rec(
 	row_sel_fetch_columns(index, clust_rec, offsets,
 			      UT_LIST_GET_FIRST(plan->columns));
 	*out_rec = clust_rec;
-func_exit:
 	err = DB_SUCCESS;
 err_exit:
 	if (UNIV_LIKELY_NULL(heap)) {
@@ -1119,7 +1109,7 @@ re_scan:
 
 			/* MDEV-14059 FIXME: why re-latch the block?
 			pcur is already positioned on it! */
-			ulint		page_no = page_get_page_no(
+			uint32_t page_no = page_get_page_no(
 				btr_pcur_get_page(pcur));
 
 			cur_block = buf_page_get_gen(
@@ -2901,7 +2891,7 @@ row_sel_store_mysql_field(
 		if (UNIV_UNLIKELY(!data)) {
 			/* The externally stored field was not written
 			yet. This record should only be seen by
-			recv_recovery_rollback_active() or any
+			trx_rollback_recovered() or any
 			TRX_ISO_READ_UNCOMMITTED transactions. */
 
 			if (heap != prebuilt->blob_heap) {
@@ -3188,20 +3178,46 @@ row_sel_build_prev_vers_for_mysql(
 	return(err);
 }
 
-/** Helper class to cache clust_rec and old_ver */
+/** Helper class to cache clust_rec and old_vers */
 class Row_sel_get_clust_rec_for_mysql
 {
-	const rec_t *cached_clust_rec;
-	rec_t *cached_old_vers;
+  const rec_t *cached_clust_rec;
+  rec_t *cached_old_vers;
+  lsn_t cached_lsn;
+  page_id_t cached_page_id;
+
+#ifdef UNIV_DEBUG
+  void check_eq(const dict_index_t *index, const rec_offs *offsets) const
+  {
+    rec_offs vers_offs[REC_OFFS_HEADER_SIZE + MAX_REF_PARTS];
+    rec_offs_init(vers_offs);
+    mem_heap_t *heap= nullptr;
+
+    ut_ad(rec_offs_validate(cached_clust_rec, index, offsets));
+    ut_ad(index->first_user_field() <= rec_offs_n_fields(offsets));
+    ut_ad(vers_offs == rec_get_offsets(cached_old_vers, index, vers_offs, true,
+                                       index->db_trx_id(), &heap));
+    ut_ad(!heap);
+    for (auto n= index->db_trx_id(); n--; )
+    {
+      const dict_col_t *col= dict_index_get_nth_col(index, n);
+      ulint len1, len2;
+      const byte *b1= rec_get_nth_field(cached_clust_rec, offsets, n, &len1);
+      const byte *b2= rec_get_nth_field(cached_old_vers, vers_offs, n, &len2);
+      ut_ad(!cmp_data_data(col->mtype, col->prtype, b1, len1, b2, len2));
+    }
+  }
+#endif
 
 public:
-	Row_sel_get_clust_rec_for_mysql() :
-	cached_clust_rec(NULL), cached_old_vers(NULL) {}
+  Row_sel_get_clust_rec_for_mysql() :
+    cached_clust_rec(NULL), cached_old_vers(NULL), cached_lsn(0),
+    cached_page_id(page_id_t(0,0)) {}
 
-	dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
-			const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
-			rec_offs **offsets, mem_heap_t **offset_heap,
-			dtuple_t **vrow, mtr_t *mtr);
+  dberr_t operator()(row_prebuilt_t *prebuilt, dict_index_t *sec_index,
+                     const rec_t *rec, que_thr_t *thr, const rec_t **out_rec,
+                     rec_offs **offsets, mem_heap_t **offset_heap,
+                     dtuple_t **vrow, mtr_t *mtr);
 };
 
 /*********************************************************************//**
@@ -3401,8 +3417,15 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 		    && !lock_clust_rec_cons_read_sees(
 			    clust_rec, clust_index, *offsets,
 			    &trx->read_view)) {
+			const buf_page_t& bpage = btr_pcur_get_block(
+				prebuilt->clust_pcur)->page;
 
-			if (clust_rec != cached_clust_rec) {
+			const lsn_t lsn = mach_read_from_8(
+				page_align(clust_rec) + FIL_PAGE_LSN);
+
+			if (lsn != cached_lsn
+			    || bpage.id() != cached_page_id
+			    || clust_rec != cached_clust_rec) {
 				/* The following call returns 'offsets' associated with
 				'old_vers' */
 				err = row_sel_build_prev_vers_for_mysql(
@@ -3414,6 +3437,8 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 
 					goto err_exit;
 				}
+				cached_lsn = lsn;
+				cached_page_id = bpage.id();
 				cached_clust_rec = clust_rec;
 				cached_old_vers = old_vers;
 			} else {
@@ -3424,7 +3449,8 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 				version of clust_rec and its old version
 				old_vers. Re-calculate the offsets for old_vers. */
 
-				if (old_vers != NULL) {
+				if (old_vers) {
+					ut_d(check_eq(clust_index, *offsets));
 					*offsets = rec_get_offsets(
 						old_vers, clust_index, *offsets,
 						true, ULINT_UNDEFINED, offset_heap);
@@ -3458,10 +3484,18 @@ Row_sel_get_clust_rec_for_mysql::operator()(
 			|| trx->isolation_level <= TRX_ISO_READ_UNCOMMITTED
 			|| dict_index_is_spatial(sec_index)
 			|| rec_get_deleted_flag(rec, dict_table_is_comp(
-							sec_index->table)))
-		    && !row_sel_sec_rec_is_for_clust_rec(
-			    rec, sec_index, clust_rec, clust_index, thr)) {
-			clust_rec = NULL;
+							sec_index->table)))) {
+			err = row_sel_sec_rec_is_for_clust_rec(rec, sec_index,
+						clust_rec, clust_index, thr);
+			switch (err) {
+			case DB_SUCCESS:
+				clust_rec = NULL;
+				break;
+			case DB_SUCCESS_LOCKED_REC:
+				break;
+			default:
+				goto err_exit;
+			}
 		}
 
 		err = DB_SUCCESS;
@@ -3872,7 +3906,7 @@ exhausted:
 
 /*********************************************************************//**
 Check a pushed-down index condition.
-@return CHECK_NEG, CHECK_POS, or CHECK_OUT_OF_RANGE */
+@return CHECK_ABORTED_BY_USER, CHECK_NEG, CHECK_POS, or CHECK_OUT_OF_RANGE */
 static
 check_result_t
 row_search_idx_cond_check(
@@ -3958,7 +3992,7 @@ row_search_idx_cond_check(
                         case CHECK_POS:
                                 break;
                         default:
-                                ut_error;
+                                return(result);
                         }
 		}
 		/* Convert the remaining fields to MySQL format.
@@ -4091,6 +4125,10 @@ bool row_search_with_covering_prefix(
 	const dict_index_t*	index = prebuilt->index;
 	ut_ad(!dict_index_is_clust(index));
 
+	if (dict_index_is_spatial(index)) {
+		return false;
+	}
+
 	if (!srv_prefix_index_cluster_optimization) {
 		return false;
 	}
@@ -4101,9 +4139,16 @@ bool row_search_with_covering_prefix(
 		return false;
 	}
 
+	/* We can avoid a clustered index lookup if
+	all of the following hold:
+	(1) all columns are in the secondary index
+	(2) all values for columns that are prefix-only
+	indexes are shorter than the prefix size
+	This optimization can avoid many IOs for certain schemas. */
 	for (ulint i = 0; i < prebuilt->n_template; i++) {
 		mysql_row_templ_t* templ = prebuilt->mysql_template + i;
 		ulint j = templ->rec_prefix_field_no;
+		ut_ad(!templ->mbminlen == !templ->mbmaxlen);
 
 		/** Condition (1) : is the field in the index. */
 		if (j == ULINT_UNDEFINED) {
@@ -4113,33 +4158,29 @@ bool row_search_with_covering_prefix(
 		/** Condition (2): If this is a prefix index then
 		row's value size shorter than prefix length. */
 
-		if (!templ->rec_field_is_prefix) {
+		if (!templ->rec_field_is_prefix
+		    || rec_offs_nth_sql_null(offsets, j)) {
 			continue;
 		}
 
-		ulint rec_size = rec_offs_nth_size(offsets, j);
 		const dict_field_t* field = dict_index_get_nth_field(index, j);
-		ulint max_chars = field->prefix_len / templ->mbmaxlen;
 
-		ut_a(field->prefix_len > 0);
-
-		if (rec_size < max_chars) {
-			/* Record in bytes shorter than the index
-			prefix length in char. */
+		if (!field->prefix_len) {
 			continue;
 		}
 
-		if (rec_size * templ->mbminlen >= field->prefix_len) {
+		const ulint rec_size = rec_offs_nth_size(offsets, j);
+
+		if (rec_size >= field->prefix_len) {
 			/* Shortest representation string by the
 			byte length of the record is longer than the
 			maximum possible index prefix. */
 			return false;
 		}
 
-		size_t num_chars = rec_field_len_in_chars(
-			field->col, j, rec, offsets);
-
-		if (num_chars >= max_chars) {
+		if (templ->mbminlen != templ->mbmaxlen
+		    && rec_field_len_in_chars(field->col, j, rec, offsets)
+		    >= field->prefix_len / templ->mbmaxlen) {
 			/* No of chars to store the record exceeds
 			the index prefix character length. */
 			return false;
@@ -4412,15 +4453,21 @@ early_not_found:
 					switch (row_search_idx_cond_check(
 							buf, prebuilt,
 							rec, offsets)) {
+					case CHECK_ABORTED_BY_USER:
+						goto aborted;
 					case CHECK_NEG:
 					case CHECK_OUT_OF_RANGE:
-                                        case CHECK_ABORTED_BY_USER:
                                         case CHECK_ERROR:
 						err = DB_RECORD_NOT_FOUND;
 						goto shortcut_done;
 					case CHECK_POS:
 						goto shortcut_done;
 					}
+
+					ut_ad("incorrect code" == 0);
+aborted:
+					err = DB_INTERRUPTED;
+					goto shortcut_done;
 				}
 
 				if (!row_sel_store_mysql_rec(
@@ -4454,6 +4501,9 @@ early_not_found:
 				trx->op_info = "";
 				ut_ad(!sync_check_iterate(sync_check()));
 				ut_ad(!did_semi_consistent_read);
+				if (UNIV_LIKELY_NULL(heap)) {
+					mem_heap_free(heap);
+				}
 				DBUG_RETURN(err);
 
 			case SEL_RETRY:
@@ -5150,9 +5200,11 @@ no_gap_lock:
 						buf, prebuilt, rec, offsets)) {
 				case CHECK_NEG:
 					goto next_rec;
-				case CHECK_OUT_OF_RANGE:
                                 case CHECK_ABORTED_BY_USER:
-                                case CHECK_ERROR:
+					err = DB_INTERRUPTED;
+					goto idx_cond_failed;
+				case CHECK_OUT_OF_RANGE:
+				case CHECK_ERROR:
 					err = DB_RECORD_NOT_FOUND;
 					goto idx_cond_failed;
 				case CHECK_POS:
@@ -5210,8 +5262,10 @@ locks_ok_del_marked:
 			row_unlock_for_mysql(prebuilt, TRUE);
 		}
 		goto next_rec;
-	case CHECK_OUT_OF_RANGE:
         case CHECK_ABORTED_BY_USER:
+		err = DB_INTERRUPTED;
+		goto idx_cond_failed;
+	case CHECK_OUT_OF_RANGE:
         case CHECK_ERROR:
 		err = DB_RECORD_NOT_FOUND;
 		goto idx_cond_failed;
@@ -5711,7 +5765,7 @@ normal_return:
 
 func_exit:
 	trx->op_info = "";
-	if (heap != NULL) {
+	if (UNIV_LIKELY_NULL(heap)) {
 		mem_heap_free(heap);
 	}
 

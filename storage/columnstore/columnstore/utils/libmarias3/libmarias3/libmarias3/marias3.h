@@ -69,6 +69,7 @@ enum ms3_error_code_t
   MS3_ERR_NOT_FOUND,
   MS3_ERR_SERVER,
   MS3_ERR_TOO_BIG,
+  MS3_ERR_AUTH_ROLE,
   MS3_ERR_MAX // Always the last error
 };
 
@@ -80,7 +81,8 @@ enum ms3_set_option_t
   MS3_OPT_DISABLE_SSL_VERIFY,
   MS3_OPT_BUFFER_CHUNK_SIZE,
   MS3_OPT_FORCE_LIST_VERSION,
-  MS3_OPT_FORCE_PROTOCOL_VERSION
+  MS3_OPT_FORCE_PROTOCOL_VERSION,
+  MS3_OPT_PORT_NUMBER
 };
 
 typedef enum ms3_set_option_t ms3_set_option_t;
@@ -100,6 +102,9 @@ MS3_API
 ms3_st *ms3_init(const char *s3key, const char *s3secret,
                  const char *region,
                  const char *base_domain);
+
+MS3_API
+uint8_t ms3_init_assume_role(ms3_st *ms3, const char *iam_role, const char *sts_endpoint, const char *sts_region);
 
 MS3_API
 uint8_t ms3_set_option(ms3_st *ms3, ms3_set_option_t option, void *value);
@@ -152,6 +157,9 @@ uint8_t ms3_delete(ms3_st *ms3, const char *bucket, const char *key);
 MS3_API
 uint8_t ms3_status(ms3_st *ms3, const char *bucket, const char *key,
                    ms3_status_st *status);
+
+MS3_API
+uint8_t ms3_assume_role(ms3_st *ms3);
 
 #ifdef __cplusplus
 }

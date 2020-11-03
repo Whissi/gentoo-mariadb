@@ -6,6 +6,7 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/columnstoreLogRotate.in" "${CMAKE_CU
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/postInstall.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/postInstall.sh" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/startupTests.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/startupTests.sh" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mariadb-columnstore.service.in" "${CMAKE_CURRENT_SOURCE_DIR}/mariadb-columnstore.service" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mariadb-columnstore-start.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/mariadb-columnstore-start.sh" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/columnstore_module_installer.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/columnstore_module_installer.sh" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/master-rep-columnstore.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/master-rep-columnstore.sh" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/disable-rep-columnstore.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/disable-rep-columnstore.sh" @ONLY)
@@ -22,7 +23,8 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-ddlproc.service.in" "${CMAKE_CUR
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-loadbrm.service.in" "${CMAKE_CURRENT_SOURCE_DIR}/mcs-loadbrm.service" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-storagemanager.service.in" "${CMAKE_CURRENT_SOURCE_DIR}/mcs-storagemanager.service" @ONLY)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-stop-controllernode.sh.in" "${CMAKE_CURRENT_SOURCE_DIR}/mcs-stop-controllernode.sh" @ONLY)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-loadbrm.py.in" "${CMAKE_CURRENT_SOURCE_DIR}/mcs-loadbrm.py")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-loadbrm.py.in" "${CMAKE_CURRENT_SOURCE_DIR}/mcs-loadbrm.py" @ONLY)
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/mcs-savebrm.py.in" "${CMAKE_CURRENT_SOURCE_DIR}/mcs-savebrm.py" @ONLY)
 
 install(PROGRAMS columnstore-post-install 
                 columnstore-pre-uninstall 
@@ -47,6 +49,7 @@ install(PROGRAMS columnstore-post-install
                 mcs_module_installer.sh
                 mcs-stop-controllernode.sh
                 mcs-loadbrm.py
+                mcs-savebrm.py
                 mariadb-columnstore-start.sh
                 mariadb-columnstore-stop.sh
                 DESTINATION ${ENGINE_BINDIR} COMPONENT columnstore-engine)

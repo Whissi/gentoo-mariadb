@@ -1171,7 +1171,7 @@ bool wsrep_must_sync_wait (THD* thd, uint mask)
     mysql_mutex_lock(&thd->LOCK_thd_data);
     ret= (thd->variables.wsrep_sync_wait & mask) &&
       thd->wsrep_client_thread &&
-      thd->variables.wsrep_on &&
+      WSREP_ON &&
       !(thd->variables.wsrep_dirty_reads &&
         !is_update_query(thd->lex->sql_command)) &&
       !thd->in_active_multi_stmt_transaction() &&
@@ -1922,6 +1922,14 @@ bool wsrep_can_run_in_toi(THD *thd, const char *db, const char *table,
     DBUG_ASSERT(first_table);
 
     if (thd->find_temporary_table(first_table))
+    {
+      return false;
+    }
+    return true;
+    break;
+  case SQLCOM_DROP_TRIGGER:
+    DBUG_ASSERT(table_list);
+    if (thd->find_temporary_table(table_list))
     {
       return false;
     }
@@ -2867,7 +2875,14 @@ int wsrep_create_trigger_query(THD *thd, uchar** buf, size_t* buf_len)
     definer_host.length= 0;
   }
 
-  stmt_query.append(STRING_WITH_LEN("CREATE "));
+  const LEX_CSTRING command[2]=
+      {{ C_STRING_WITH_LEN("CREATE ") },
+       { C_STRING_WITH_LEN("CREATE OR REPLACE ") }};
+
+  if (thd->lex->create_info.or_replace())
+    stmt_query.append(command[1]);
+  else
+    stmt_query.append(command[0]);
 
   append_definer(thd, &stmt_query, &definer_user, &definer_host);
 

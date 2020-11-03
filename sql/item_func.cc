@@ -640,8 +640,7 @@ void Item_func::print_op(String *str, enum_query_type query_type)
     str->append(func_name());
     str->append(' ');
   }
-  args[arg_count-1]->print_parenthesised(str, query_type,
-                                         (enum precedence)(precedence() + 1));
+  args[arg_count-1]->print_parenthesised(str, query_type, higher_precedence());
 }
 
 
@@ -1493,14 +1492,13 @@ double Item_func_div::real_op()
 my_decimal *Item_func_div::decimal_op(my_decimal *decimal_value)
 {
   int err;
-  my_decimal tmp;
   VDec2_lazy val(args[0], args[1]);
   if ((null_value= val.has_null()))
     return 0;
   if ((err= check_decimal_overflow(my_decimal_div(E_DEC_FATAL_ERROR &
                                                   ~E_DEC_OVERFLOW &
                                                   ~E_DEC_DIV_ZERO,
-                                                  &tmp,
+                                                  decimal_value,
                                                   val.m_a.ptr(), val.m_b.ptr(),
                                                   prec_increment))) > 3)
   {
@@ -1509,7 +1507,6 @@ my_decimal *Item_func_div::decimal_op(my_decimal *decimal_value)
     null_value= 1;
     return 0;
   }
-  tmp.round_to(decimal_value, decimals, HALF_UP);
   return decimal_value;
 }
 
@@ -2245,35 +2242,54 @@ bool Item_func_bit_neg::fix_length_and_dec()
 
 void Item_func_int_val::fix_length_and_dec_int_or_decimal()
 {
+  DBUG_ASSERT(args[0]->cmp_type() == DECIMAL_RESULT);
+  DBUG_ASSERT(args[0]->max_length <= DECIMAL_MAX_STR_LENGTH);
   /*
-    The INT branch of this code should be revised.
-    It creates too large data types, e.g.
-      CREATE OR REPLACE TABLE t2 AS SELECT FLOOR(9999999.999) AS fa;
-    results in a BININT(10) column, while INT(7) should probably be enough.
+    FLOOR() for negative numbers can increase length:   floor(-9.9) -> -10
+    CEILING() for positive numbers can increase length:  ceil(9.9)  -> 10
   */
-  ulonglong tmp_max_length= (ulonglong ) args[0]->max_length - 
-    (args[0]->decimals ? args[0]->decimals + 1 : 0) + 2;
-  max_length= tmp_max_length > (ulonglong) UINT_MAX32 ?
-    (uint32) UINT_MAX32 : (uint32) tmp_max_length;
-  uint tmp= float_length(decimals);
-  set_if_smaller(max_length,tmp);
-  decimals= 0;
+  decimal_round_mode mode= round_mode();
+  uint length_increase= args[0]->decimals > 0 &&
+                        (mode == CEILING ||
+                         (mode == FLOOR && !args[0]->unsigned_flag)) ? 1 : 0;
+  uint precision= args[0]->decimal_int_part() + length_increase;
+  set_if_bigger(precision, 1);
 
   /*
-    -2 because in most high position can't be used any digit for longlong
-    and one position for increasing value during operation
+    The BIGINT data type can store:
+    UNSIGNED BIGINT: 0..18446744073709551615                     - up to 19 digits
+      SIGNED BIGINT:   -9223372036854775808..9223372036854775807 - up to 18 digits
+
+    The INT data type can store:
+        UNSIGNED INT:  0..4294967295          - up to 9 digits
+          SIGNED INT: -2147483648..2147483647 - up to 9 digits
   */
-  if (args[0]->max_length - args[0]->decimals >= DECIMAL_LONGLONG_DIGITS - 2)
+  if (precision > 18)
   {
+    unsigned_flag= args[0]->unsigned_flag;
     fix_char_length(
-      my_decimal_precision_to_length_no_truncation(
-        args[0]->decimal_int_part(), 0, false));
+      my_decimal_precision_to_length_no_truncation(precision, 0,
+                                                   unsigned_flag));
     set_handler(&type_handler_newdecimal);
   }
   else
   {
-    unsigned_flag= args[0]->unsigned_flag;
-    set_handler(type_handler_long_or_longlong());
+    uint sign_length= (unsigned_flag= args[0]->unsigned_flag) ? 0 : 1;
+    fix_char_length(precision + sign_length);
+    if (precision > 9)
+    {
+      if (unsigned_flag)
+        set_handler(&type_handler_ulonglong);
+      else
+        set_handler(&type_handler_slonglong);
+    }
+    else
+    {
+      if (unsigned_flag)
+        set_handler(&type_handler_ulong);
+      else
+        set_handler(&type_handler_slong);
+    }
   }
 }
 
@@ -3998,6 +4014,8 @@ int Interruptible_wait::wait(mysql_cond_t *cond, mysql_mutex_t *mutex)
       timeout= m_abs_timeout;
 
     error= mysql_cond_timedwait(cond, mutex, &timeout);
+    if (m_thd->check_killed())
+      break;
     if (error == ETIMEDOUT || error == ETIME)
     {
       /* Return error if timed out or connection is broken. */

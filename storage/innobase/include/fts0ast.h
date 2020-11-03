@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2007, 2018, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2018, MariaDB Corporation.
+Copyright (c) 2016, 2020, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -28,14 +28,6 @@ Created 2007/03/16/03 Sunny Bains
 #define INNOBASE_FST0AST_H
 
 #include "mem0mem.h"
-
-#ifdef UNIV_PFS_MEMORY
-
-#define malloc(A)	ut_malloc_nokey(A)
-#define free(A)		ut_free(A)
-#define realloc(P, A)	ut_realloc(P, A)
-
-#endif /* UNIV_PFS_MEMORY */
 
 /* The type of AST Node */
 enum fts_ast_type_t {

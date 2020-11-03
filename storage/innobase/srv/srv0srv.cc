@@ -55,7 +55,6 @@ Created 10/8/1995 Heikki Tuuri
 #include "lock0lock.h"
 #include "log0recv.h"
 #include "mem0mem.h"
-#include "os0proc.h"
 #include "pars0pars.h"
 #include "que0que.h"
 #include "row0mysql.h"
@@ -73,7 +72,7 @@ Created 10/8/1995 Heikki Tuuri
 #include "fil0crypt.h"
 #include "fil0pagecompress.h"
 #include "trx0types.h"
-
+#include <list>
 
 #include <my_service_manager.h>
 /* The following is the maximum allowed duration of a lock wait. */
@@ -343,11 +342,6 @@ my_bool	srv_stats_sample_traditional;
 
 my_bool	srv_use_doublewrite_buf;
 
-/** innodb_doublewrite_batch_size (a debug parameter) specifies the
-number of pages to use in LRU and flush_list batch flushing.
-The rest of the doublewrite buffer is used for single-page flushing. */
-ulong	srv_doublewrite_batch_size = 120;
-
 /** innodb_sync_spin_loops */
 ulong	srv_n_spin_wait_rounds;
 /** innodb_spin_wait_delay */
@@ -460,16 +454,6 @@ UNIV_INTERN uint srv_simulate_comp_failures;
 /** Buffer pool dump status frequence in percentages */
 UNIV_INTERN ulong srv_buf_dump_status_frequency;
 
-/** Acquire the system_mutex. */
-#define srv_sys_mutex_enter() do {			\
-	mutex_enter(&srv_sys.mutex);			\
-} while (0)
-
-/** Release the system mutex. */
-#define srv_sys_mutex_exit() do {			\
-	mutex_exit(&srv_sys.mutex);			\
-} while (0)
-
 /*
 	IMPLEMENTATION OF THE SERVER MAIN PROGRAM
 	=========================================
@@ -549,8 +533,6 @@ struct srv_sys_t{
 	UT_LIST_BASE_NODE_T(que_thr_t)
 			tasks;			/*!< task queue */
 
-	ib_mutex_t	mutex;			/*!< variable protecting the
-						fields below. */
 	srv_stats_t::ulint_ctr_1_t
 			activity_count;		/*!< For tracking server
 						activity */
@@ -585,16 +567,6 @@ char*	srv_buf_dump_filename;
 and/or load it during startup. */
 char	srv_buffer_pool_dump_at_shutdown = TRUE;
 char	srv_buffer_pool_load_at_startup = TRUE;
-
-/** Slot index in the srv_sys.sys_threads array for the master thread. */
-#define SRV_MASTER_SLOT 0
-
-/** Slot index in the srv_sys.sys_threads array for the purge thread. */
-#define SRV_PURGE_SLOT 1
-
-/** Slot index in the srv_sys.sys_threads array from which purge workers start.
-  */
-#define SRV_WORKER_SLOTS_START 2
 
 #ifdef HAVE_PSI_STAGE_INTERFACE
 /** Performance schema stage event for monitoring ALTER TABLE progress
@@ -725,15 +697,9 @@ static bool need_srv_free;
 static void srv_init()
 {
 	mutex_create(LATCH_ID_SRV_INNODB_MONITOR, &srv_innodb_monitor_mutex);
-	srv_thread_pool_init();
 
 	if (!srv_read_only_mode) {
-		mutex_create(LATCH_ID_SRV_SYS, &srv_sys.mutex);
-
 		mutex_create(LATCH_ID_SRV_SYS_TASKS, &srv_sys.tasks_mutex);
-
-
-		buf_flush_event = os_event_create("buf_flush_event");
 
 		UT_LIST_INIT(srv_sys.tasks, &que_thr_t::queue);
 	}
@@ -763,7 +729,6 @@ static void srv_init()
 	/* Initialize some INFORMATION SCHEMA internal structures */
 	trx_i_s_cache_init(trx_i_s_cache);
 
-	ut_crc32_init();
 }
 
 /*********************************************************************//**
@@ -780,9 +745,7 @@ srv_free(void)
 	mutex_free(&page_zip_stat_per_index_mutex);
 
 	if (!srv_read_only_mode) {
-		mutex_free(&srv_sys.mutex);
 		mutex_free(&srv_sys.tasks_mutex);
-		os_event_destroy(buf_flush_event);
 	}
 
 	ut_d(os_event_destroy(srv_master_thread_disabled_event));
@@ -797,6 +760,7 @@ void
 srv_boot(void)
 /*==========*/
 {
+	srv_thread_pool_init();
 	sync_check_init();
 	trx_pool_init();
 	row_mysql_init();
@@ -1146,9 +1110,6 @@ srv_export_innodb_status(void)
 	export_vars.innodb_buffer_pool_wait_free =
 		srv_stats.buf_pool_wait_free;
 
-	export_vars.innodb_buffer_pool_pages_flushed =
-		srv_stats.buf_pool_flushed;
-
 	export_vars.innodb_buffer_pool_reads = srv_stats.buf_pool_reads;
 
 	export_vars.innodb_buffer_pool_read_ahead_rnd =
@@ -1264,8 +1225,6 @@ srv_export_innodb_status(void)
 	export_vars.innodb_system_rows_deleted =
 		srv_stats.n_system_rows_deleted;
 
-	export_vars.innodb_num_open_files = fil_system.n_open;
-
 	export_vars.innodb_truncated_status_writes =
 		srv_truncated_status_writes;
 
@@ -1322,13 +1281,13 @@ srv_export_innodb_status(void)
 
 	mutex_exit(&srv_innodb_monitor_mutex);
 
-	log_mutex_enter();
+	mysql_mutex_lock(&log_sys.mutex);
 	export_vars.innodb_lsn_current = log_sys.get_lsn();
 	export_vars.innodb_lsn_flushed = log_sys.get_flushed_lsn();
 	export_vars.innodb_lsn_last_checkpoint = log_sys.last_checkpoint_lsn;
 	export_vars.innodb_checkpoint_max_age = static_cast<ulint>(
 		log_sys.max_checkpoint_age);
-	log_mutex_exit();
+	mysql_mutex_unlock(&log_sys.mutex);
 
 	export_vars.innodb_checkpoint_age = static_cast<ulint>(
 		export_vars.innodb_lsn_current
@@ -1515,7 +1474,6 @@ void
 srv_wake_purge_thread_if_not_active()
 {
 	ut_ad(!srv_read_only_mode);
-	ut_ad(!mutex_own(&srv_sys.mutex));
 
 	if (purge_sys.enabled() && !purge_sys.paused()
 	    && trx_sys.rseg_history_len) {
@@ -1586,8 +1544,7 @@ void purge_sys_t::resume()
 }
 
 /*******************************************************************//**
-Get current server activity count. We don't hold srv_sys::mutex while
-reading this value as it is only used in heuristics.
+Get current server activity count.
 @return activity count. */
 ulint
 srv_get_activity_count(void)
@@ -1596,11 +1553,10 @@ srv_get_activity_count(void)
 	return(srv_sys.activity_count);
 }
 
-/** Check if there has been any activity.
-@param[in,out]  activity_count  recent activity count to be returned
-if there is a change
-@return FALSE if no change in activity counter. */
-bool srv_check_activity(ulint  *activity_count)
+/** Check if srv_inc_activity_count() has been called.
+@param activity_count   copy of srv_sys.activity_count
+@return whether the activity_count had changed */
+static bool srv_check_activity(ulint *activity_count)
 {
   ulint new_activity_count= srv_sys.activity_count;
   if (new_activity_count != *activity_count)
@@ -1800,28 +1756,6 @@ srv_master_do_active_tasks(void)
 		MONITOR_INC_TIME_IN_MICRO_SECS(
 			MONITOR_SRV_DICT_LRU_MICROSECOND, counter_time);
 	}
-
-	/* The periodic log_checkpoint() call here makes it harder to
-	reproduce bugs in crash recovery or mariabackup --prepare, or
-	in code that writes the redo log records. Omitting the call
-	here should not affect correctness, because log_free_check()
-	should still be invoking checkpoints when needed. In a
-	production server, those calls could cause "furious flushing"
-	and stall the server. Normally we want to perform checkpoints
-	early and often to avoid those situations. */
-	DBUG_EXECUTE_IF("ib_log_checkpoint_avoid", return;);
-
-	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
-		return;
-	}
-
-	/* Make a new checkpoint */
-	if (cur_time % SRV_MASTER_CHECKPOINT_INTERVAL == 0) {
-		srv_main_thread_op_info = "making checkpoint";
-		log_checkpoint();
-		MONITOR_INC_TIME_IN_MICRO_SECS(
-			MONITOR_SRV_CHECKPOINT_MICROSECOND, counter_time);
-	}
 }
 
 /*********************************************************************//**
@@ -1880,30 +1814,6 @@ srv_master_do_idle_tasks(void)
 	srv_sync_log_buffer_in_background();
 	MONITOR_INC_TIME_IN_MICRO_SECS(
 		MONITOR_SRV_LOG_FLUSH_MICROSECOND, counter_time);
-
-	/* The periodic log_checkpoint() call here makes it harder to
-	reproduce bugs in crash recovery or mariabackup --prepare, or
-	in code that writes the redo log records. Omitting the call
-	here should not affect correctness, because log_free_check()
-	should still be invoking checkpoints when needed. In a
-	production server, those calls could cause "furious flushing"
-	and stall the server. Normally we want to perform checkpoints
-	early and often to avoid those situations. */
-	DBUG_EXECUTE_IF("ib_log_checkpoint_avoid", return;);
-
-	if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED) {
-		return;
-	}
-
-	/* Make a new checkpoint */
-	srv_main_thread_op_info = "making checkpoint";
-	log_checkpoint();
-	MONITOR_INC_TIME_IN_MICRO_SECS(MONITOR_SRV_CHECKPOINT_MICROSECOND,
-				       counter_time);
-
-	/* This is a workaround to avoid the InnoDB hang when OS datetime
-	changed backwards.*/
-	os_event_set(buf_flush_event);
 }
 
 /**
@@ -2110,7 +2020,7 @@ static uint32_t srv_do_purge(ulint* n_total_purged)
 }
 
 
-static std::queue<THD*> purge_thds;
+static std::list<THD*> purge_thds;
 static std::mutex purge_thd_mutex;
 extern void* thd_attach_thd(THD*);
 extern void thd_detach_thd(void *);
@@ -2120,11 +2030,11 @@ THD* acquire_thd(void **ctx)
 	std::unique_lock<std::mutex> lk(purge_thd_mutex);
 	if (purge_thds.empty()) {
 		THD* thd = current_thd;
-		purge_thds.push(innobase_create_background_thd("InnoDB purge worker"));
+		purge_thds.push_back(innobase_create_background_thd("InnoDB purge worker"));
 		set_current_thd(thd);
 	}
 	THD* thd = purge_thds.front();
-	purge_thds.pop();
+	purge_thds.pop_front();
 	lk.unlock();
 
 	/* Set current thd, and thd->mysys_var as well,
@@ -2137,7 +2047,7 @@ void release_thd(THD *thd, void *ctx)
 {
 	thd_detach_thd(ctx);
 	std::unique_lock<std::mutex> lk(purge_thd_mutex);
-	purge_thds.push(thd);
+	purge_thds.push_back(thd);
 	lk.unlock();
 	set_current_thd(0);
 }
@@ -2236,7 +2146,7 @@ static void srv_shutdown_purge_tasks()
   while (!purge_thds.empty())
   {
     innobase_destroy_background_thd(purge_thds.front());
-    purge_thds.pop();
+    purge_thds.pop_front();
   }
 }
 

@@ -948,10 +948,10 @@ void dict_drop_index_tree(btr_pcur_t* pcur, trx_t* trx, mtr_t* mtr)
 
 	ut_ad(len == 8);
 
-	if (fil_space_t* s = fil_space_acquire_silent(space_id)) {
+	if (fil_space_t* s = fil_space_t::get(space_id)) {
 		/* Ensure that the tablespace file exists
 		in order to avoid a crash in buf_page_get_gen(). */
-		if (s->size || fil_space_get_size(space_id)) {
+		if (root_page_no < s->get_size()) {
 			btr_free_if_exists(page_id_t(space_id, root_page_no),
 					   s->zip_size(),
 					   mach_read_from_8(ptr), mtr);
@@ -1511,7 +1511,7 @@ dict_create_or_check_foreign_constraint_tables(void)
 
 	row_mysql_unlock_data_dictionary(trx);
 
-	trx_free(trx);
+	trx->free();
 
 	srv_file_per_table = srv_file_per_table_backup;
 
@@ -1612,7 +1612,7 @@ dict_create_or_check_sys_virtual()
 
 	row_mysql_unlock_data_dictionary(trx);
 
-	trx_free(trx);
+	trx->free();
 
 	srv_file_per_table = srv_file_per_table_backup;
 
@@ -2146,7 +2146,7 @@ dict_create_or_check_sys_tablespace(void)
 
 	row_mysql_unlock_data_dictionary(trx);
 
-	trx_free(trx);
+	trx->free();
 
 	srv_file_per_table = srv_file_per_table_backup;
 

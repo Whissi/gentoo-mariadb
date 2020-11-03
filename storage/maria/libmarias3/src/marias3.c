@@ -22,6 +22,7 @@
 
 #include <pthread.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 
 ms3_malloc_callback ms3_cmalloc = (ms3_malloc_callback)malloc;
 ms3_free_callback ms3_cfree = (ms3_free_callback)free;
@@ -166,6 +167,7 @@ ms3_st *ms3_init(const char *s3key, const char *s3secret,
   ms3->s3key = ms3_cstrdup(s3key);
   ms3->s3secret = ms3_cstrdup(s3secret);
   ms3->region = ms3_cstrdup(region);
+  ms3->port = 0; /* The default value */
 
   if (base_domain && strlen(base_domain))
   {
@@ -203,14 +205,63 @@ ms3_st *ms3_init(const char *s3key, const char *s3secret,
   ms3->disable_verification = false;
   ms3->first_run = true;
   ms3->path_buffer = ms3_cmalloc(sizeof(char) * 1024);
-  ms3->query_buffer = ms3_cmalloc(sizeof(char) * 1024);
+  ms3->query_buffer = ms3_cmalloc(sizeof(char) * 3072);
   ms3->list_container.pool = NULL;
   ms3->list_container.next = NULL;
   ms3->list_container.start = NULL;
   ms3->list_container.pool_list = NULL;
   ms3->list_container.pool_free = 0;
 
+  ms3->iam_role = NULL;
+
   return ms3;
+}
+
+uint8_t ms3_init_assume_role(ms3_st *ms3, const char *iam_role, const char *sts_endpoint, const char *sts_region)
+{
+  uint8_t ret=0;
+
+  if (iam_role == NULL)
+  {
+      return MS3_ERR_PARAMETER;
+  }
+  ms3->iam_role = ms3_cstrdup(iam_role);
+
+  if (sts_endpoint && strlen(sts_endpoint))
+  {
+      ms3->sts_endpoint = ms3_cstrdup(sts_endpoint);
+  }
+  else
+  {
+      ms3->sts_endpoint = ms3_cstrdup("sts.amazonaws.com");
+  }
+
+  if (sts_region && strlen(sts_region))
+  {
+      ms3->sts_region = ms3_cstrdup(sts_region);
+  }
+  else
+  {
+      ms3->sts_region = ms3_cstrdup("us-east-1");
+  }
+
+  ms3->iam_endpoint = ms3_cstrdup("iam.amazonaws.com");
+
+  ms3->iam_role_arn = ms3_cmalloc(sizeof(char) * 2048);
+  ms3->iam_role_arn[0] = '\0';
+  ms3->role_key = ms3_cmalloc(sizeof(char) * 128);
+  ms3->role_key[0] = '\0';
+  ms3->role_secret = ms3_cmalloc(sizeof(char) * 1024);
+  ms3->role_secret[0] = '\0';
+  // aws says theres no maximum length here.. 2048 might be overkill
+  ms3->role_session_token = ms3_cmalloc(sizeof(char) * 2048);
+  ms3->role_session_token[0] = '\0';
+  // 0 will uses the default and not set a value in the request
+  ms3->role_session_duration = 0;
+
+  ret = ms3_assume_role(ms3);
+
+  return ret;
 }
 
 static void list_free(ms3_st *ms3)
@@ -249,6 +300,17 @@ void ms3_deinit(ms3_st *ms3)
   ms3_cfree(ms3->s3key);
   ms3_cfree(ms3->region);
   ms3_cfree(ms3->base_domain);
+  if (ms3->iam_role)
+  {
+    ms3_cfree(ms3->iam_role);
+    ms3_cfree(ms3->iam_endpoint);
+    ms3_cfree(ms3->sts_endpoint);
+    ms3_cfree(ms3->sts_region);
+    ms3_cfree(ms3->iam_role_arn);
+    ms3_cfree(ms3->role_key);
+    ms3_cfree(ms3->role_secret);
+    ms3_cfree(ms3->role_session_token);
+  }
   curl_easy_cleanup(ms3->curl);
   ms3_cfree(ms3->last_error);
   ms3_cfree(ms3->path_buffer);
@@ -534,9 +596,48 @@ uint8_t ms3_set_option(ms3_st *ms3, ms3_set_option_t option, void *value)
       break;
     }
 
+    case MS3_OPT_PORT_NUMBER:
+    {
+      int port_number;
+
+      if (!value)
+      {
+        return MS3_ERR_PARAMETER;
+      }
+      memcpy(&port_number, (void*)value, sizeof(int));
+
+      ms3->port = port_number;
+      break;
+    }
     default:
       return MS3_ERR_PARAMETER;
   }
 
   return 0;
 }
+
+uint8_t ms3_assume_role(ms3_st *ms3)
+{
+    uint8_t res = 0;
+
+    if (!ms3 || !ms3->iam_role)
+    {
+      return MS3_ERR_PARAMETER;
+    }
+
+    if (!strstr(ms3->iam_role_arn, ms3->iam_role))
+    {
+        ms3debug("Lookup IAM role ARN");
+        res = execute_assume_role_request(ms3, MS3_CMD_LIST_ROLE, NULL, 0, NULL);
+        if(res)
+        {
+          return res;
+        }
+
+    }
+    ms3debug("Assume IAM role");
+    res = execute_assume_role_request(ms3, MS3_CMD_ASSUME_ROLE, NULL, 0, NULL);
+
+    return res;
+}
+

@@ -51,7 +51,11 @@
   but the stored block will be the size of the compressed block.
 
   Implementation:
-  The s3 engine inherits from the ha_maria handler
+  The s3 engine inherits from the ha_maria handler.
+
+  It uses Aria code and relies on Aria being enabled. We don't have to check
+  that Aria is enabled though, because Aria is a mandatory plugin, and
+  the server will refuse to start if Aria failed to initialize.
 
   s3 will use it's own page cache to not interfere with normal Aria
   usage but also to ensure that the S3 page cache is large enough
@@ -80,6 +84,8 @@ static ulong s3_pagecache_file_hash_size;
 static ulonglong s3_pagecache_buffer_size;
 static char *s3_bucket, *s3_access_key=0, *s3_secret_key=0, *s3_region;
 static char *s3_host_name;
+static int s3_port;
+static my_bool s3_use_http;
 static char *s3_tmp_access_key=0, *s3_tmp_secret_key=0;
 static my_bool s3_debug= 0, s3_slave_ignore_updates= 0;
 static my_bool s3_replicate_alter_as_create_select= 0;
@@ -181,6 +187,15 @@ static MYSQL_SYSVAR_STR(host_name, s3_host_name,
        PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
       "AWS host name",
        0, 0, DEFAULT_AWS_HOST_NAME);
+static MYSQL_SYSVAR_INT(port, s3_port,
+       PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+      "Port number to connect to (0 means use default)",
+       NULL /*check*/, NULL /*update*/, 0 /*default*/,
+       0 /*min*/, 65535 /*max*/, 1 /*blk*/);
+static MYSQL_SYSVAR_BOOL(use_http, s3_use_http,
+       PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
+      "If true, force use of HTTP protocol",
+       NULL /*check*/, NULL /*update*/, 0 /*default*/);
 static MYSQL_SYSVAR_STR(access_key, s3_tmp_access_key,
        PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY | PLUGIN_VAR_MEMALLOC,
       "AWS access key",
@@ -258,7 +273,7 @@ int ha_s3::write_row(const uchar *buf)
   DBUG_ENTER("ha_s3::write_row");
   if (in_alter_table)
     DBUG_RETURN(ha_maria::write_row(buf));
-  DBUG_RETURN(HA_ERR_WRONG_COMMAND);
+  DBUG_RETURN(HA_ERR_TABLE_READONLY);
 }
 
 /* Return true if S3 can be used */
@@ -276,6 +291,8 @@ static my_bool s3_info_init(S3_INFO *info)
     return 1;
   info->protocol_version= (uint8_t) s3_protocol_version;
   lex_string_set(&info->host_name,  s3_host_name);
+  info->port= s3_port;
+  info->use_http= s3_use_http;
   lex_string_set(&info->access_key, s3_access_key);
   lex_string_set(&info->secret_key, s3_secret_key);
   lex_string_set(&info->region,     s3_region);
@@ -563,7 +580,25 @@ int ha_s3::open(const char *name, int mode, uint open_flags)
   if (!s3_usable())
     DBUG_RETURN(HA_ERR_UNSUPPORTED);
 
-  if (mode != O_RDONLY && !(open_flags & HA_OPEN_FOR_CREATE))
+  /*
+    On slaves with s3_slave_ignore_updates set we allow tables to be
+    opened in write mode to be able to ignore queries that modify
+    the table trough handler::check_if_updates_are_ignored().
+
+    This is needed for the slave to be able to handle
+    CREATE TABLE t1...
+    INSERT INTO TABLE t1 ....
+    ALTER TABLE t1 ENGINE=S3
+    If this is not done, the insert will fail on the slave if the
+    master has already executed the ALTER TABLE.
+
+    We also have to allow open for create, as part of
+    ALTER TABLE ... ENGINE=S3.
+
+    Otherwise we only allow the table to be open in read mode
+  */
+  if (mode != O_RDONLY && !(open_flags & HA_OPEN_FOR_CREATE) &&
+      !s3_slave_ignore_updates)
     DBUG_RETURN(EACCES);
 
   open_args= 0;
@@ -965,14 +1000,7 @@ static int ha_s3_init(void *p)
   bool res;
   static const char *no_exts[]= { 0 };
 
-  /* This can happen if Aria fails to start */
-  if (!maria_hton)
-    return HA_ERR_INITIALIZATION;
-
   s3_hton= (handlerton *)p;
-
-  /* Use Aria engine as a base */
-  memcpy(s3_hton, maria_hton, sizeof(*s3_hton));
   s3_hton->db_type= DB_TYPE_S3;
   s3_hton->create= s3_create_handler;
   s3_hton->panic=  s3_hton_panic;
@@ -1050,6 +1078,8 @@ static struct st_mysql_sys_var* system_variables[]= {
   MYSQL_SYSVAR(pagecache_division_limit),
   MYSQL_SYSVAR(pagecache_file_hash_size),
   MYSQL_SYSVAR(host_name),
+  MYSQL_SYSVAR(port),
+  MYSQL_SYSVAR(use_http),
   MYSQL_SYSVAR(bucket),
   MYSQL_SYSVAR(access_key),
   MYSQL_SYSVAR(secret_key),
@@ -1077,6 +1107,6 @@ maria_declare_plugin(s3)
   status_variables,             /* status variables */
   system_variables,             /* system variables */
   "1.0",                        /* string version   */
-  MariaDB_PLUGIN_MATURITY_ALPHA /* maturity         */
+  MariaDB_PLUGIN_MATURITY_GAMMA /* maturity         */
 }
 maria_declare_plugin_end;

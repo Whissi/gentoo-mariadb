@@ -1,5 +1,5 @@
 /* Copyright (c) 2003, 2016, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2019, MariaDB
+   Copyright (c) 2009, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -3034,7 +3034,7 @@ CLI_MYSQL_REAL_CONNECT(MYSQL *mysql,const char *host, const char *user,
     /* New protocol with 16 bytes to describe server characteristics */
     mysql->server_language=end[2];
     mysql->server_status=uint2korr(end+3);
-    mysql->server_capabilities|= uint2korr(end+5) << 16;
+    mysql->server_capabilities|= ((unsigned) uint2korr(end+5)) << 16;
     pkt_scramble_len= end[7];
     if (pkt_scramble_len < 0)
     {
@@ -3732,6 +3732,12 @@ static MYSQL_RES * cli_use_result(MYSQL *mysql)
   mysql->status=MYSQL_STATUS_USE_RESULT;
   mysql->unbuffered_fetch_owner= &result->unbuffered_fetch_cancelled;
   DBUG_RETURN(result);			/* Data is read to be fetched */
+}
+
+
+my_ulonglong STDCALL mysql_affected_rows(MYSQL *mysql)
+{
+  return mysql->affected_rows;
 }
 
 

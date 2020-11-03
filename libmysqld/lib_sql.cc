@@ -333,7 +333,7 @@ static my_bool emb_read_query_result(MYSQL *mysql)
 static int emb_stmt_execute(MYSQL_STMT *stmt)
 {
   DBUG_ENTER("emb_stmt_execute");
-  uchar header[5];
+  uchar header[9];
   THD *thd;
   my_bool res;
 
@@ -345,6 +345,7 @@ static int emb_stmt_execute(MYSQL_STMT *stmt)
 
   int4store(header, stmt->stmt_id);
   header[4]= (uchar) stmt->flags;
+  header[5]= header[6]= header[7]= header[8]= 0; // safety
   thd= (THD*)stmt->mysql->thd;
   thd->client_param_count= stmt->param_count;
   thd->client_params= stmt->params;
@@ -1139,7 +1140,7 @@ bool Protocol::send_result_set_metadata(List<Item> *list, uint flags)
 
   for (uint pos= 0 ; (item= it++); pos++)
   {
-    if (prot.store_field_metadata(thd, item, pos))
+    if (prot.store_item_metadata(thd, item, pos))
       goto err;
   }
 
@@ -1254,8 +1255,7 @@ bool Protocol_binary::write()
     @retval FALSE Success
 */
 
-bool
-net_send_ok(THD *thd,
+bool Protocol::net_send_ok(THD *thd,
             uint server_status, uint statement_warn_count,
             ulonglong affected_rows, ulonglong id, const char *message,
             bool, bool)
@@ -1290,7 +1290,7 @@ net_send_ok(THD *thd,
 */
 
 bool
-net_send_eof(THD *thd, uint server_status, uint statement_warn_count)
+Protocol::net_send_eof(THD *thd, uint server_status, uint statement_warn_count)
 {
   bool error= write_eof_packet(thd, server_status, statement_warn_count);
   thd->cur_data= 0;
@@ -1298,8 +1298,8 @@ net_send_eof(THD *thd, uint server_status, uint statement_warn_count)
 }
 
 
-bool net_send_error_packet(THD *thd, uint sql_errno, const char *err,
-                           const char *sqlstate)
+bool Protocol::net_send_error_packet(THD *thd, uint sql_errno, const char *err,
+                                     const char *sqlstate)
 {
   uint error;
   char converted_err[MYSQL_ERRMSG_SIZE];

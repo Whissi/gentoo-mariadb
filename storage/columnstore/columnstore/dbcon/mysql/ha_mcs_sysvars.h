@@ -62,6 +62,9 @@ void set_derived_handler(THD* thd, bool value);
 bool get_group_by_handler(THD* thd);
 void set_group_by_handler(THD* thd, bool value);
 
+bool get_select_handler_in_stored_procedures(THD* thd);
+void set_select_handler_in_stored_procedures(THD* thd, bool value);
+
 uint get_orderby_threads(THD* thd);
 void set_orderby_threads(THD* thd, uint value);
 
@@ -112,5 +115,11 @@ void set_import_for_batchinsert_enclosed_by(THD* thd, ulong value);
 
 bool get_replication_slave(THD* thd);
 void set_replication_slave(THD* thd, bool value);
+
+bool get_cache_inserts(THD* thd);
+void set_cache_inserts(THD* thd, bool value);
+
+ulonglong get_cache_flush_threshold(THD* thd);
+void set_cache_flush_threshold(THD* thd, ulonglong value);
 
 #endif

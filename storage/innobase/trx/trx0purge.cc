@@ -192,7 +192,7 @@ void purge_sys_t::close()
   ut_ad(!trx->id);
   ut_ad(trx->state == TRX_STATE_ACTIVE);
   trx->state= TRX_STATE_NOT_STARTED;
-  trx_free(trx);
+  trx->free();
   rw_lock_free(&latch);
   mutex_free(&pq_mutex);
   mem_heap_free(heap);
@@ -262,7 +262,7 @@ trx_purge_add_undo_to_history(const trx_t* trx, trx_undo_t*& undo, mtr_t* mtr)
 	or in trx_rollback_recovered() in slow shutdown.
 
 	Before any transaction-generating background threads or the
-	purge have been started, recv_recovery_rollback_active() can
+	purge have been started, we can
 	start transactions in row_merge_drop_temp_indexes() and
 	fts_drop_orphaned_tables(), and roll back recovered transactions.
 
@@ -584,11 +584,10 @@ static void trx_purge_truncate_history()
 				     : 0, j = i;; ) {
 				ulint space_id = srv_undo_space_id_start + i;
 				ut_ad(srv_is_undo_tablespace(space_id));
+				fil_space_t* space= fil_space_get(space_id);
 
-				if (fil_space_get_size(space_id)
-				    > threshold) {
-					purge_sys.truncate.current
-						= fil_space_get(space_id);
+				if (space && space->get_size() > threshold) {
+					purge_sys.truncate.current = space;
 					break;
 				}
 
@@ -680,7 +679,7 @@ not_free:
 		mini-transaction commit and the server was killed, then
 		discarding the to-be-trimmed pages without flushing would
 		break crash recovery. So, we cannot avoid the write. */
-		buf_LRU_flush_or_remove_pages(space.id, true);
+		while (buf_flush_dirty_pages(space.id));
 
 		log_free_check();
 
@@ -778,12 +777,12 @@ not_free:
 		/* This is only executed by srv_purge_coordinator_thread. */
 		export_vars.innodb_undo_truncations++;
 
-		/* TODO: PUNCH_HOLE the garbage (with write-ahead logging) */
+		/* In MDEV-8319 (10.5) we will PUNCH_HOLE the garbage
+		(with write-ahead logging). */
 		mutex_enter(&fil_system.mutex);
 		ut_ad(&space == purge_sys.truncate.current);
-		ut_ad(space.stop_new_ops);
 		ut_ad(space.is_being_truncated);
-		purge_sys.truncate.current->stop_new_ops = false;
+		purge_sys.truncate.current->set_stopping(false);
 		purge_sys.truncate.current->is_being_truncated = false;
 		mutex_exit(&fil_system.mutex);
 

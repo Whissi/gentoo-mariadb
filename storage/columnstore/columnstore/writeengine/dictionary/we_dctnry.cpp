@@ -215,6 +215,15 @@ int  Dctnry::createDctnry( const OID& dctnryOID, int colWidth,
 
         // if obsolete file exists, "w+b" will truncate and write over
         m_dFile = createDctnryFile(fileName, colWidth, "w+b", DEFAULT_BUFSIZ);
+
+        {
+            // We presume the path will contain /
+            std::string filePath(fileName);
+            if (chownDataPath(filePath))
+            {
+                return ERR_FILE_CHOWN;
+            }
+        }
     }
     else
     {

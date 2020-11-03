@@ -47,10 +47,16 @@ void mutate_optimizer_flags(THD *thd_)
     // MCOL-2178 Disable all optimizer flags as it was in the fork.
     // CS restores it later in SH::scan_end() and in case of an error
     // in SH::scan_init()
-    set_original_optimizer_flags(thd_->variables.optimizer_switch, thd_);
-    thd_->variables.optimizer_switch = OPTIMIZER_SWITCH_IN_TO_EXISTS |
+
+    ulonglong flags_to_set = OPTIMIZER_SWITCH_IN_TO_EXISTS |
         OPTIMIZER_SWITCH_COND_PUSHDOWN_FOR_DERIVED |
         OPTIMIZER_SWITCH_COND_PUSHDOWN_FROM_HAVING;
+
+    if (thd_->variables.optimizer_switch == flags_to_set)
+        return;
+
+    set_original_optimizer_flags(thd_->variables.optimizer_switch, thd_);
+    thd_->variables.optimizer_switch = flags_to_set;
 }
 
 void restore_optimizer_flags(THD *thd_)
@@ -476,6 +482,10 @@ create_columnstore_derived_handler(THD* thd, TABLE_LIST *derived)
         return handler;
     }
 
+    // Disable derived handler for prepared statements
+    if (thd->stmt_arena && thd->stmt_arena->is_stmt_execute())
+        return handler;
+
     SELECT_LEX_UNIT *unit= derived->derived;
     SELECT_LEX *sl= unit->first_select();
 
@@ -599,7 +609,7 @@ int ha_columnstore_derived_handler::init_scan()
 
     mcs_handler_info mhi = mcs_handler_info(reinterpret_cast<void*>(this), DERIVED);
     // this::table is the place for the result set
-    int rc = ha_cs_impl_pushdown_init(&mhi, table);
+    int rc = ha_mcs_impl_pushdown_init(&mhi, table);
 
     DBUG_RETURN(rc);
 }
@@ -737,22 +747,21 @@ create_columnstore_select_handler(THD* thd, SELECT_LEX* select_lex)
 
     // Check the session variable value to enable/disable use of
     // select_handler
-    if (!get_select_handler(thd))
+    if (!get_select_handler(thd) ||
+        ((thd->lex)->sphead && !get_select_handler_in_stored_procedures(thd)))
     {
         return handler;
     }
 
-    // Disable SP support in the select_handler for now.
-    if ((thd->lex)->sphead)
-    {
-        return handler;
-    }
+    // Flag to indicate if this is a prepared statement
+    bool isPS = thd->stmt_arena && thd->stmt_arena->is_stmt_execute();
 
     // Disable processing of select_result_interceptor classes
     // which intercept and transform result set rows. E.g.:
     // select a,b into @a1, @a2 from t1;
     if (((thd->lex)->result &&
-         !((select_dumpvar *)(thd->lex)->result)->var_list.is_empty()))
+        !((select_dumpvar *)(thd->lex)->result)->var_list.is_empty()) &&
+        (!isPS))
     {
         return handler;
     }
@@ -788,7 +797,13 @@ create_columnstore_select_handler(THD* thd, SELECT_LEX* select_lex)
     handler= new ha_columnstore_select_handler(thd, select_lex);
     JOIN *join= select_lex->join;
     {
+        Query_arena *arena, backup;
+        arena= thd->activate_stmt_arena_if_needed(&backup);
+
         disable_indices_for_CEJ(thd);
+
+        if (arena)
+            thd->restore_active_arena(arena, &backup);
 
         if (select_lex->handle_derived(thd->lex, DT_MERGE))
         {
@@ -800,8 +815,42 @@ create_columnstore_select_handler(THD* thd, SELECT_LEX* select_lex)
         COND *conds = nullptr;
         if (!unsupported_feature)
         {
-            conds= simplify_joins_mcs(join, select_lex->join_list,
-                join->conds, TRUE, FALSE);
+            SELECT_LEX *sel= select_lex;
+            // Rewrite once for PS
+	    // Refer to JOIN::optimize_inner() in sql/sql_select.cc
+	    // for details on the optimizations performed in this block.
+            if (sel->first_cond_optimization)
+            {
+                create_explain_query_if_not_exists(thd->lex, thd->mem_root);
+                arena= thd->activate_stmt_arena_if_needed(&backup);
+                sel->first_cond_optimization= false;
+
+                conds= simplify_joins_mcs(join, select_lex->join_list,
+                    join->conds, TRUE, FALSE);
+
+                build_bitmap_for_nested_joins_mcs(select_lex->join_list, 0);
+                sel->where= conds;
+
+                if (isPS)
+                {
+                    sel->prep_where= conds ? conds->copy_andor_structure(thd) : 0;
+
+                    if (in_subselect_rewrite(sel))
+                    {
+                        unsupported_feature = true;
+                        handler->err_msg.assign("create_columnstore_select_handler(): \
+                            Internal error occured in in_subselect_rewrite()");
+                    }
+                }
+
+                select_lex->update_used_tables();
+
+                if (arena)
+                    thd->restore_active_arena(arena, &backup);
+
+                // Unset SL::first_cond_optimization
+                opt_flag_unset_PS(sel);
+            }
         }
 
         if (!unsupported_feature && conds)
@@ -814,18 +863,16 @@ create_columnstore_select_handler(THD* thd, SELECT_LEX* select_lex)
 
         // MCOL-3747 IN-TO-EXISTS rewrite inside MDB didn't add
         // an equi-JOIN condition.
-        if (!unsupported_feature && in_subselect_rewrite(select_lex))
+        if (!unsupported_feature && !isPS && in_subselect_rewrite(select_lex))
         {
             unsupported_feature = true;
             handler->err_msg.assign("create_columnstore_select_handler(): \
                 Internal error occured in in_subselect_rewrite()");
         }
-
     }
 
     // We shouldn't raise error now so set an error to raise it later in init_SH.
     handler->rewrite_error= unsupported_feature;
-
     // Return SH even if init fails b/c CS changed SELECT_LEX structures
     // with simplify_joins_mcs()
     return handler;
@@ -877,7 +924,7 @@ int ha_columnstore_select_handler::init_scan()
         {
             mcs_handler_info mhi= mcs_handler_info(
                 reinterpret_cast<void*>(this), SELECT);
-            rc= ha_cs_impl_pushdown_init(&mhi, this->table);
+            rc= ha_mcs_impl_pushdown_init(&mhi, this->table);
         }
     }
     else
@@ -904,7 +951,7 @@ int ha_columnstore_select_handler::next_row()
 {
     DBUG_ENTER("ha_columnstore_select_handler::next_row");
 
-    int rc= ha_cs_impl_select_next(table->record[0], table);
+    int rc= ha_mcs_impl_select_next(table->record[0], table);
 
     DBUG_RETURN(rc);
 }

@@ -896,6 +896,7 @@ typedef struct st_print_event_info
    */
   IO_CACHE head_cache;
   IO_CACHE body_cache;
+  IO_CACHE tail_cache;
 #ifdef WHEN_FLASHBACK_REVIEW_READY
   /* Storing the SQL for reviewing */
   IO_CACHE review_sql_cache;
@@ -906,6 +907,7 @@ typedef struct st_print_event_info
   ~st_print_event_info() {
     close_cached_file(&head_cache);
     close_cached_file(&body_cache);
+    close_cached_file(&tail_cache);
 #ifdef WHEN_FLASHBACK_REVIEW_READY
     close_cached_file(&review_sql_cache);
 #endif
@@ -2225,8 +2227,10 @@ public:
   virtual bool is_commit()   { return false; }
   virtual bool is_rollback() { return false; }
 #ifdef MYSQL_SERVER
-  Query_compressed_log_event(THD* thd_arg, const char* query_arg, ulong query_length,
-    bool using_trans, bool direct, bool suppress_use, int error);
+  Query_compressed_log_event(THD* thd_arg, const char* query_arg,
+                             ulong query_length,
+                             bool using_trans, bool direct, bool suppress_use,
+                             int error);
   virtual bool write();
 #endif
 };

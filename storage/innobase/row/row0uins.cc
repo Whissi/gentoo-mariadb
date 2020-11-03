@@ -84,6 +84,7 @@ row_undo_ins_remove_clust_rec(
 		online = false;
 	} else {
 		index->set_modified(mtr);
+		ut_ad(lock_table_has_locks(index->table));
 		online = dict_index_is_online_ddl(index);
 		if (online) {
 			ut_ad(node->rec_type == TRX_UNDO_INSERT_REC);
@@ -400,7 +401,7 @@ static bool row_undo_ins_parse_undo_rec(undo_node_t* node, bool dict_locked)
 		goto close_table;
 	}
 
-	if (UNIV_UNLIKELY(!fil_table_accessible(node->table))) {
+	if (UNIV_UNLIKELY(!node->table->is_accessible())) {
 close_table:
 		/* Normally, tables should not disappear or become
 		unaccessible during ROLLBACK, because they should be
@@ -566,7 +567,7 @@ row_undo_ins(
 		}
 
 		if (err == DB_SUCCESS && node->table->stat_initialized) {
-			/* Not protected by dict_table_stats_lock() for
+			/* Not protected by dict_sys.mutex for
 			performance reasons, we would rather get garbage
 			in stat_n_rows (which is just an estimate anyway)
 			than protecting the following code with a latch. */

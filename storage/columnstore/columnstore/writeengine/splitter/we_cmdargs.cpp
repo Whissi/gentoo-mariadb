@@ -144,6 +144,9 @@ std::string WECmdArgs::getCpImportCmdLine()
         else if (0 == fLocFile.length()) //No filename given, from job file
             aSS << " -f " << fPmFilePath;
     }
+    
+    if (fUsername.length() > 0)
+        aSS << " -U " << fUsername;
 
     if (fJobId.length() > 0)
         aSS << " -j " << fJobId;
@@ -576,7 +579,7 @@ void WECmdArgs::usage()
     cout << "\nExample4: Import a nation table to only PM1 and PM2 in Mode 1\n"
          << "\tcpimport -m 1 -P 1,2 tpch nation nation.tbl";
     cout << "\nExample5: Import nation.tbl from PMs to nation table in Mode 2\n"
-         << "\tcpimport -m 2 tpch nation -l nation.tbl";
+         << "\tcpimport -m 2 tpch nation -f /var/lib/columnstore/data/bulk/data/import/ -l nation.tbl";
     cout << "\nExample6: Import nation.tbl in mode 3\n"
          << "\tcpimport -m 3 tpch nation nation.tbl\n\n";
 
@@ -597,19 +600,14 @@ void WECmdArgs::parseCmdLineArgs(int argc, char** argv)
     if (argc > 0)
         fPrgmName = "cpimport.bin"; //argv[0] is splitter but we need cpimport
 
-    //Just for testing cpimport invoking in UM
-    //if(argc>0)
-    //	fPrgmName = "/home/bpaul/genii/export/bin/cpimport";
-
     while ((aCh = getopt(argc, argv,
-                         "d:j:w:s:v:l:r:b:e:B:f:q:ihm:E:C:P:I:n:p:c:ST:Ny:K:t:H:g:"))
+                         "d:j:w:s:v:l:r:b:e:B:f:q:ihm:E:C:P:I:n:p:c:ST:Ny:K:t:H:g:U:"))
             != EOF)
     {
         switch (aCh)
         {
             case 'm':
             {
-                //fMode = atoi(optarg);
                 fArgMode = atoi(optarg);
 
                 //cout << "Mode level set to " << fMode << endl;
@@ -937,6 +935,12 @@ void WECmdArgs::parseCmdLineArgs(int argc, char** argv)
                 break;
             }
 
+            case 'U': //-U username of the files owner
+            {
+                fUsername = optarg;
+                break;
+            }
+
             default:
             {
                 std::string aErr = "Unknown command line option " + aCh;
@@ -953,6 +957,9 @@ void WECmdArgs::parseCmdLineArgs(int argc, char** argv)
     std::string bulkRootPath = getBulkRootDir();
 
     checkForBulkLogDir(bulkRootPath);
+
+    if (2 == fArgMode && fPmFilePath.empty())
+        throw runtime_error("-f option is mandatory with mode 2.");
 
     if (aJobType)
     {

@@ -149,6 +149,10 @@ public:
   Item_subselect(THD *thd);
 
   virtual subs_type substype() { return UNKNOWN_SUBS; }
+  bool is_exists_predicate()
+  {
+    return substype() == Item_subselect::EXISTS_SUBS;
+  }
   bool is_in_predicate()
   {
     return get_IN_subquery() != NULL;
@@ -636,7 +640,7 @@ public:
   bool val_bool() override;
   bool test_limit(st_select_lex_unit *unit);
   void print(String *str, enum_query_type query_type) override;
-  enum precedence precedence() const override { return CMP_PRECEDENCE; }
+  enum precedence precedence() const override { return IN_PRECEDENCE; }
   bool fix_fields(THD *thd, Item **ref) override;
   bool fix_length_and_dec() override;
   void fix_after_pullout(st_select_lex *new_parent, Item **ref,
