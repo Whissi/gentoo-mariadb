@@ -1,8 +1,8 @@
-commit: 6d3792a9a2e30201ffbdc977e370e96825b24f3b
-date: 2020-10-31 19:49:24 +0200
-build-date: 2020-10-31 17:52:47 +0000 
-short: 6d3792a
+commit: bea84aefb0563a10a310ea81d46c372919345c10
+date: 2020-11-09 13:51:32 -0800
+build-date: 2020-11-09 21:59:51 +0000 
+short: bea84ae
 branch: HEAD
 
 
-MariaDB source 10.2.35
+MariaDB source 10.2.36
