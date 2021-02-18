@@ -2314,8 +2314,11 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
   {
     bool is_trans= 0;
     bool table_creation_was_logged= 0;
+    bool real_table= FALSE;
     LEX_CSTRING db= table->db;
     handlerton *table_type= 0;
+    // reset error state for this table
+    error= 0;
 
     DBUG_PRINT("table", ("table_l: '%s'.'%s'  table: %p  s: %p",
                          table->db.str, table->table_name.str,  table->table,
@@ -2331,9 +2334,35 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
                   thd->find_temporary_table(table) &&
                   table->mdl_request.ticket != NULL));
 
-    if (table->open_type == OT_BASE_ONLY || !is_temporary_table(table) ||
-        (drop_sequence && table->table->s->table_type != TABLE_TYPE_SEQUENCE))
+    if (table->open_type == OT_BASE_ONLY || !is_temporary_table(table))
+      real_table= TRUE;
+    else if (drop_sequence &&
+            table->table->s->table_type != TABLE_TYPE_SEQUENCE)
+    {
+      was_table= (table->table->s->table_type == TABLE_TYPE_NORMAL);
+      was_view= (table->table->s->table_type == TABLE_TYPE_VIEW);
+      if (if_exists)
+      {
+        char buff[FN_REFLEN];
+        String tbl_name(buff, sizeof(buff), system_charset_info);
+        tbl_name.length(0);
+        tbl_name.append(&db);
+        tbl_name.append('.');
+        tbl_name.append(&table->table_name);
+        push_warning_printf(thd, Sql_condition::WARN_LEVEL_NOTE,
+                            ER_NOT_SEQUENCE2, ER_THD(thd, ER_NOT_SEQUENCE2),
+                            tbl_name.c_ptr_safe());
+
+        /*
+          Our job is done here. This statement was added to avoid executing
+          unnecessary code farther below which in some strange corner cases
+          caused the server to crash (see MDEV-17896).
+        */
+        goto log_query;
+      }
       error= 1;
+      goto non_critical_err;
+    }
     else
     {
       table_creation_was_logged= table->table->s->table_creation_was_logged;
@@ -2342,29 +2371,28 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
         error= 1;
         goto err;
       }
-      error= 0;
       table->table= 0;
     }
 
-    if ((drop_temporary && if_exists) || !error)
+    if ((drop_temporary && if_exists) || !real_table)
     {
       /*
         This handles the case of temporary tables. We have the following cases:
 
           . "DROP TEMPORARY" was executed and a temporary table was affected
-          (i.e. drop_temporary && !error) or the if_exists was specified (i.e.
-          drop_temporary && if_exists).
+          (i.e. drop_temporary && !real_table) or the
+          if_exists was specified (i.e. drop_temporary && if_exists).
 
           . "DROP" was executed but a temporary table was affected (.i.e
-          !error).
+          !real_table).
       */
       if (!dont_log_query && table_creation_was_logged)
       {
         /*
-          If there is an error, we don't know the type of the engine
+          If there is an real_table, we don't know the type of the engine
           at this point. So, we keep it in the trx-cache.
         */
-        is_trans= error ? TRUE : is_trans;
+        is_trans= real_table ? TRUE : is_trans;
         if (is_trans)
           trans_tmp_table_deleted= TRUE;
         else
@@ -2391,7 +2419,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
         is no need to proceed with the code that tries to drop a regular
         table.
       */
-      if (!error) continue;
+      if (!real_table) continue;
     }
     else if (!drop_temporary)
     {
@@ -2407,7 +2435,6 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
                                         reg_ext, 0);
     }
     DEBUG_SYNC(thd, "rm_table_no_locks_before_delete_table");
-    error= 0;
     if (drop_temporary ||
         (ha_table_exists(thd, &db, &alias, &table_type, &is_sequence) == 0 &&
          table_type == 0) ||
@@ -2447,6 +2474,11 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
       {
         non_tmp_error = (drop_temporary ? non_tmp_error : TRUE);
         error= 1;
+        /*
+          non critical error (only for this table), so we continue.
+          Next we write it to wrong_tables and continue this loop
+          The same as "goto non_critical_err".
+        */
       }
     }
     else
@@ -2540,7 +2572,7 @@ int mysql_rm_table_no_locks(THD *thd, TABLE_LIST *tables, bool if_exists,
       }
       non_tmp_error|= MY_TEST(error);
     }
-
+non_critical_err:
     if (error)
     {
       if (wrong_tables.length())
@@ -4013,8 +4045,7 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
 	    {
 	      /* not a critical problem */
 	      push_warning_printf(thd, Sql_condition::WARN_LEVEL_NOTE,
-                                  ER_TOO_LONG_KEY,
-                                  ER_THD(thd, ER_TOO_LONG_KEY),
+                                  ER_TOO_LONG_KEY, ER_THD(thd, ER_TOO_LONG_KEY),
                                   key_part_length);
               /* Align key length to multibyte char boundary */
               key_part_length-= key_part_length % sql_field->charset->mbmaxlen;
@@ -4060,7 +4091,7 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
 	if (key->type == Key::MULTIPLE)
 	{
 	  /* not a critical problem */
-	  push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
+	  push_warning_printf(thd, Sql_condition::WARN_LEVEL_NOTE,
                               ER_TOO_LONG_KEY, ER_THD(thd, ER_TOO_LONG_KEY),
                               key_part_length);
           /* Align key length to multibyte char boundary */
@@ -4297,7 +4328,8 @@ mysql_prepare_create_table(THD *thd, HA_CREATE_INFO *create_info,
                           ER_ILLEGAL_HA_CREATE_OPTION,
                           ER_THD(thd, ER_ILLEGAL_HA_CREATE_OPTION),
                           file->engine_name()->str,
-                          "TRANSACTIONAL=1");
+                          create_info->transactional == HA_CHOICE_YES
+                          ? "TRANSACTIONAL=1" : "TRANSACTIONAL=0");
 
   if (parse_option_list(thd, file->partition_ht(), &create_info->option_struct,
                           &create_info->option_list,
@@ -5232,6 +5264,9 @@ bool mysql_create_table(THD *thd, TABLE_LIST *create_table,
   if (!opt_explicit_defaults_for_timestamp)
     promote_first_timestamp_column(&alter_info->create_list);
 
+  /* We can abort create table for any table type */
+  thd->abort_on_warning= thd->is_strict_mode();
+
   if (mysql_create_table_no_lock(thd, &create_table->db,
                                  &create_table->table_name, create_info,
                                  alter_info,
@@ -5269,6 +5304,8 @@ bool mysql_create_table(THD *thd, TABLE_LIST *create_table,
   }
 
 err:
+  thd->abort_on_warning= 0;
+
   /* In RBR or readonly server we don't need to log CREATE TEMPORARY TABLE */
   if (!result && create_info->tmp_table() &&
       (thd->is_current_stmt_binlog_format_row() || (opt_readonly && !thd->slave_thread)))
@@ -9818,6 +9855,7 @@ do_continue:;
 
   tmp_disable_binlog(thd);
   create_info->options|=HA_CREATE_TMP_ALTER;
+  create_info->alias= alter_ctx.table_name;
   error= create_table_impl(thd,
                            &alter_ctx.db, &alter_ctx.table_name,
                            &alter_ctx.new_db, &alter_ctx.tmp_name,
@@ -9939,16 +9977,14 @@ do_continue:;
     if (use_inplace)
     {
       table->s->frm_image= &frm;
-      enum_check_fields save_count_cuted_fields= thd->count_cuted_fields;
       /*
         Set the truncated column values of thd as warning
         for alter table.
       */
-      thd->count_cuted_fields = CHECK_FIELD_WARN;
+      Check_level_instant_set check_level_save(thd, CHECK_FIELD_WARN);
       int res= mysql_inplace_alter_table(thd, table_list, table, altered_table,
                                          &ha_alter_info, inplace_supported,
                                          &target_mdl_request, &alter_ctx);
-      thd->count_cuted_fields= save_count_cuted_fields;
       my_free(const_cast<uchar*>(frm.str));
 
       if (res)

@@ -320,8 +320,7 @@ public:
 				    &mtr, NULL)) {
 				mutex_exit(&recv_sys->mutex);
 				ibuf_merge_or_delete_for_page(
-					block, i->first,
-					&block->page.size, true);
+					block, i->first, block->page.size);
 				mtr.commit();
 				mtr.start();
 				mutex_enter(&recv_sys->mutex);
@@ -2463,7 +2462,7 @@ apply:
 
 	/* Wait until all the pages have been processed */
 
-	while (recv_sys->n_addrs != 0) {
+	while (recv_sys->n_addrs || buf_get_n_pending_read_ios()) {
 		const bool abort = recv_sys->found_corrupt_log
 			|| recv_sys->found_corrupt_fs;
 
@@ -3931,6 +3930,7 @@ recv_recovery_from_checkpoint_start(lsn_t flush_lsn)
 	mutex_enter(&recv_sys->mutex);
 
 	recv_sys->apply_log_recs = TRUE;
+	recv_no_ibuf_operations = is_mariabackup_restore_or_export();
 
 	mutex_exit(&recv_sys->mutex);
 

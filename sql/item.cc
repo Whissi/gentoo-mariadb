@@ -1620,18 +1620,13 @@ int Item::save_in_field_no_warnings(Field *field, bool no_conversions)
   int res;
   TABLE *table= field->table;
   THD *thd= table->in_use;
-  enum_check_fields tmp= thd->count_cuted_fields;
-  my_bitmap_map *old_map= dbug_tmp_use_all_columns(table, table->write_set);
-  sql_mode_t sql_mode= thd->variables.sql_mode;
+  Check_level_instant_set check_level_save(thd, CHECK_FIELD_IGNORE);
+  Sql_mode_save sql_mode(thd);
   thd->variables.sql_mode&= ~(MODE_NO_ZERO_IN_DATE | MODE_NO_ZERO_DATE);
   thd->variables.sql_mode|= MODE_INVALID_DATES;
-  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-
+  MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->write_set);
   res= save_in_field(field, no_conversions);
-
-  thd->count_cuted_fields= tmp;
-  dbug_tmp_restore_column_map(table->write_set, old_map);
-  thd->variables.sql_mode= sql_mode;
+  dbug_tmp_restore_column_map(&table->write_set, old_map);
   return res;
 }
 
@@ -6056,7 +6051,7 @@ bool Item_field::fix_fields(THD *thd, Item **reference)
   Field *from_field= (Field *)not_found_field;
   bool outer_fixed= false;
   SELECT_LEX *select= thd->lex->current_select;
-  
+
   if (select && select->in_tvc)
   {
     my_error(ER_FIELD_REFERENCE_IN_TVC, MYF(0), full_name());
@@ -6952,7 +6947,7 @@ Item *Item_string::make_odbc_literal(THD *thd, const LEX_CSTRING *typestr)
 }
 
 
-static int save_int_value_in_field (Field *field, longlong nr, 
+static int save_int_value_in_field (Field *field, longlong nr,
                                     bool null_value, bool unsigned_flag)
 {
   if (null_value)
@@ -8561,6 +8556,22 @@ bool Item_direct_ref::is_null()
 bool Item_direct_ref::get_date(MYSQL_TIME *ltime,ulonglong fuzzydate)
 {
   return (null_value=(*ref)->get_date(ltime,fuzzydate));
+}
+
+
+longlong Item_direct_ref::val_time_packed()
+{
+  longlong tmp = (*ref)->val_time_packed();
+  null_value= (*ref)->null_value;
+  return tmp;
+}
+
+
+longlong Item_direct_ref::val_datetime_packed()
+{
+  longlong tmp = (*ref)->val_datetime_packed();
+  null_value= (*ref)->null_value;
+  return tmp;
 }
 
 

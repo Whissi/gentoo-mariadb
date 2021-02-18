@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2005, 2019, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -2397,9 +2397,9 @@ innobase_row_to_mysql(
 		}
 	}
 	if (table->vfield) {
-		my_bitmap_map*	old_vcol_set = tmp_use_all_columns(table, table->vcol_set);
+		MY_BITMAP *old_vcol_set = tmp_use_all_columns(table, &table->vcol_set);
 		table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_READ);
-		tmp_restore_column_map(table->vcol_set, old_vcol_set);
+		tmp_restore_column_map(&table->vcol_set, old_vcol_set);
 	}
 }
 
@@ -4482,11 +4482,13 @@ innobase_add_instant_try(
 	const rec_t* rec = btr_pcur_get_rec(&pcur);
 	que_thr_t* thr = pars_complete_graph_for_exec(
 		NULL, trx, ctx->heap, NULL);
+	const bool is_root = block->page.id.page_no() == index->page;
 
 	dberr_t err;
 	if (rec_is_metadata(rec, index)) {
 		ut_ad(page_rec_is_user_rec(rec));
-		if (!page_has_next(block->frame)
+		if (is_root
+		    && !page_has_next(block->frame)
 		    && page_rec_is_last(rec, block->frame)) {
 			goto empty_table;
 		}
@@ -4528,7 +4530,7 @@ innobase_add_instant_try(
 		}
 		btr_pcur_close(&pcur);
 		goto func_exit;
-	} else if (page_rec_is_supremum(rec)) {
+	} else if (is_root && page_rec_is_supremum(rec)) {
 empty_table:
 		/* The table is empty. */
 		ut_ad(fil_page_index_page_check(block->frame));
@@ -5266,11 +5268,27 @@ new_clustered_failed:
 			}
 
 			if (dict_col_name_is_reserved(field->field_name.str)) {
+wrong_column_name:
 				dict_mem_table_free(ctx->new_table);
 				ctx->new_table = ctx->old_table;
 				my_error(ER_WRONG_COLUMN_NAME, MYF(0),
 					 field->field_name.str);
 				goto new_clustered_failed;
+			}
+
+			/** Note the FTS_DOC_ID name is case sensitive due
+			 to internal query parser.
+			 FTS_DOC_ID column must be of BIGINT NOT NULL type
+			 and it should be in all capitalized characters */
+			if (!innobase_strcasecmp(field->field_name.str,
+						 FTS_DOC_ID_COL_NAME)) {
+				if (col_type != DATA_INT
+				    || field->real_maybe_null()
+				    || col_len != sizeof(doc_id_t)
+				    || strcmp(field->field_name.str,
+					      FTS_DOC_ID_COL_NAME)) {
+					goto wrong_column_name;
+				}
 			}
 
 			if (is_virtual) {
@@ -5810,6 +5828,7 @@ error_handling_drop_uncached:
 					if (ok && a == 1) {
 						row_log_free(
 							index->online_log);
+						index->online_log = NULL;
 						ok = false;
 					});
 
@@ -7273,6 +7292,7 @@ innobase_online_rebuild_log_free(
 		      == ONLINE_INDEX_CREATION);
 		clust_index->online_status = ONLINE_INDEX_COMPLETE;
 		row_log_free(clust_index->online_log);
+		clust_index->online_log = NULL;
 		DEBUG_SYNC_C("innodb_online_rebuild_log_free_aborted");
 	}
 
@@ -8760,6 +8780,44 @@ innobase_page_compression_try(
 	DBUG_RETURN(false);
 }
 
+static
+void
+dict_stats_try_drop_table(THD *thd, const table_name_t &name,
+                          const LEX_CSTRING &table_name)
+{
+  char errstr[1024];
+  if (dict_stats_drop_table(name.m_name, errstr, sizeof(errstr)) != DB_SUCCESS)
+  {
+    push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN, ER_ALTER_INFO,
+                        "Deleting persistent statistics"
+                        " for table '%s' in InnoDB failed: %s",
+                        table_name.str,
+                        errstr);
+  }
+}
+
+/** Evict the table from cache and reopen it. Drop outdated statistics.
+  @param thd                 mariadb THD entity
+  @param table               innodb table
+  @param maria_table_name    user-friendly table name for errors
+  @return newly opened table */
+static
+dict_table_t*
+innobase_reload_table(THD *thd, dict_table_t *table,
+                      const LEX_CSTRING &table_name)
+{
+  char *tb_name= strdup(table->name.m_name);
+  dict_table_close(table, true, false);
+  dict_table_remove_from_cache(table);
+  table= dict_table_open_on_name(tb_name, TRUE, TRUE,
+                                  DICT_ERR_IGNORE_FK_NOKEY);
+
+  /* Drop outdated table stats. */
+  dict_stats_try_drop_table(thd, table->name, table_name);
+  free(tb_name);
+  return table;
+}
+
 /** Commit the changes made during prepare_inplace_alter_table()
 and inplace_alter_table() inside the data dictionary tables,
 when not rebuilding the table.
@@ -9859,36 +9917,16 @@ foreign_fail:
 		}
 	}
 
-	if (ctx0->num_to_drop_vcol || ctx0->num_to_add_vcol) {
-		/* FIXME: this workaround does not seem to work with
-		partitioned tables */
+	if (ctx0->num_to_drop_vcol || ctx0->num_to_add_vcol
+	    || (ctx0->new_table->n_v_cols && !new_clustered
+		&& (ha_alter_info->alter_info->drop_list.elements
+		    || ha_alter_info->alter_info->create_list.elements))) {
 		DBUG_ASSERT(ctx0->old_table->get_ref_count() == 1);
-
 		trx_commit_for_mysql(m_prebuilt->trx);
 
-		char	tb_name[NAME_LEN * 2 + 1 + 1];
-		strcpy(tb_name, m_prebuilt->table->name.m_name);
-		dict_table_close(m_prebuilt->table, true, false);
-		dict_table_remove_from_cache(m_prebuilt->table);
-		m_prebuilt->table = dict_table_open_on_name(
-			tb_name, TRUE, TRUE, DICT_ERR_IGNORE_FK_NOKEY);
-
-		/* Drop outdated table stats. */
-		char	errstr[1024];
-		if (dict_stats_drop_table(
-			    m_prebuilt->table->name.m_name,
-			    errstr, sizeof(errstr))
-		    != DB_SUCCESS) {
-			push_warning_printf(
-				m_user_thd,
-				Sql_condition::WARN_LEVEL_WARN,
-				ER_ALTER_INFO,
-				"Deleting persistent statistics"
-				" for table '%s' in"
-				" InnoDB failed: %s",
-				table->s->table_name.str,
-				errstr);
-		}
+		m_prebuilt->table = innobase_reload_table(m_user_thd,
+                                                          m_prebuilt->table,
+                                                          table->s->table_name);
 
 		row_mysql_unlock_data_dictionary(trx);
 		trx->free();
@@ -9948,8 +9986,6 @@ foreign_fail:
 			old copy of the table (which was renamed to
 			ctx->tmp_name). */
 
-			char	errstr[1024];
-
 			DBUG_ASSERT(0 == strcmp(ctx->old_table->name.m_name,
 						ctx->tmp_name));
 
@@ -9958,20 +9994,9 @@ foreign_fail:
 				DBUG_SET("+d,innodb_report_deadlock");
 			);
 
-			if (dict_stats_drop_table(
-				    ctx->new_table->name.m_name,
-				    errstr, sizeof(errstr))
-			    != DB_SUCCESS) {
-				push_warning_printf(
-					m_user_thd,
-					Sql_condition::WARN_LEVEL_WARN,
-					ER_ALTER_INFO,
-					"Deleting persistent statistics"
-					" for rebuilt table '%s' in"
-					" InnoDB failed: %s",
-					table->s->table_name.str,
-					errstr);
-			}
+			dict_stats_try_drop_table(m_user_thd,
+                                                  ctx->new_table->name,
+                                                  table->s->table_name);
 
 			DBUG_EXECUTE_IF(
 				"ib_rename_index_fail3",

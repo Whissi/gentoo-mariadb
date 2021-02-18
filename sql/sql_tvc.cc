@@ -47,7 +47,7 @@ bool fix_fields_for_tvc(THD *thd, List_iterator_fast<List_item> &li)
 
   while ((lst= li++))
   {
-    List_iterator_fast<Item> it(*lst);
+    List_iterator<Item> it(*lst);
     Item *item;
 
     while ((item= it++))
@@ -59,7 +59,7 @@ bool fix_fields_for_tvc(THD *thd, List_iterator_fast<List_item> &li)
         while replacing their values to NAME_CONST()s.
         So fix only those that have not been.
       */
-      if (item->fix_fields_if_needed(thd, 0) ||
+      if (item->fix_fields_if_needed_for_scalar(thd, it.ref()) ||
           item->check_is_evaluable_expression_or_error())
 	DBUG_RETURN(true);
     }
@@ -829,7 +829,8 @@ static bool cmp_row_types(Item* item1, Item* item2)
     Item *inner= item1->element_index(i);
     Item *outer= item2->element_index(i);
     if (!inner->type_handler()->subquery_type_allows_materialization(inner,
-                                                                     outer))
+                                                                     outer,
+                                                                     true))
       return true;
   }
   return false;
@@ -895,7 +896,7 @@ Item *Item_func_in::in_predicate_to_in_subs_transformer(THD *thd,
   
   for (uint i=1; i < arg_count; i++)
   {
-    if (!args[i]->const_item() || cmp_row_types(args[0], args[i]))
+    if (!args[i]->const_item() || cmp_row_types(args[i], args[0]))
       return this;
   }
 
@@ -975,6 +976,7 @@ Item *Item_func_in::in_predicate_to_in_subs_transformer(THD *thd,
   if (!(in_subs=
           new (thd->mem_root) Item_in_subselect(thd, args[0], sq_select)))
     goto err;
+  in_subs->converted_from_in_predicate= TRUE;
   sq= in_subs;
   if (negated)
     sq= negate_expression(thd, in_subs);
