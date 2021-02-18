@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2005, 2019, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -1944,9 +1944,9 @@ innobase_row_to_mysql(
 		}
 	}
 	if (table->vfield) {
-		my_bitmap_map*	old_vcol_set = tmp_use_all_columns(table, table->vcol_set);
+		MY_BITMAP *old_vcol_set = tmp_use_all_columns(table, &table->vcol_set);
 		table->update_virtual_fields(table->file, VCOL_UPDATE_FOR_READ);
-		tmp_restore_column_map(table->vcol_set, old_vcol_set);
+		tmp_restore_column_map(&table->vcol_set, old_vcol_set);
 	}
 }
 
@@ -4657,10 +4657,26 @@ prepare_inplace_alter_table_dict(
 			}
 
 			if (dict_col_name_is_reserved(field->field_name)) {
+wrong_column_name:
 				dict_mem_table_free(ctx->new_table);
 				my_error(ER_WRONG_COLUMN_NAME, MYF(0),
 					 field->field_name);
 				goto new_clustered_failed;
+			}
+
+			/** Note the FTS_DOC_ID name is case sensitive due
+			 to internal query parser.
+			 FTS_DOC_ID column must be of BIGINT NOT NULL type
+			 and it should be in all capitalized characters */
+			if (!innobase_strcasecmp(field->field_name,
+						 FTS_DOC_ID_COL_NAME)) {
+				if (col_type != DATA_INT
+				    || field->real_maybe_null()
+				    || col_len != sizeof(doc_id_t)
+				    || strcmp(field->field_name,
+					      FTS_DOC_ID_COL_NAME)) {
+					goto wrong_column_name;
+				}
 			}
 
 			if (is_virtual) {
@@ -6395,6 +6411,7 @@ innobase_online_rebuild_log_free(
 		      == ONLINE_INDEX_CREATION);
 		clust_index->online_status = ONLINE_INDEX_COMPLETE;
 		row_log_free(clust_index->online_log);
+		clust_index->online_log = NULL;
 		DEBUG_SYNC_C("innodb_online_rebuild_log_free_aborted");
 	}
 

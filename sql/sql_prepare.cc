@@ -1,5 +1,5 @@
 /* Copyright (c) 2002, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2019, MariaDB
+   Copyright (c) 2008, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -117,14 +117,14 @@ When one supplies long data for a placeholder:
 #include <mysql.h>
 #else
 #include <mysql_com.h>
+/* Constants defining bits in parameter type flags. Flags are read from high byte of short value */
+static const uint PARAMETER_FLAG_UNSIGNED= 128U << 8;
 #endif
 #include "lock.h"                               // MYSQL_OPEN_FORCE_SHARED_MDL
+#include "log_event.h"                          // class Log_event
 #include "sql_handler.h"
 #include "transaction.h"                        // trans_rollback_implicit
 #include "wsrep_mysqld.h"
-
-/* Constants defining bits in parameter type flags. Flags are read from high byte of short value */
-static const uint PARAMETER_FLAG_UNSIGNED = 128U << 8;
 
 /**
   A result class used to send cursor rows using the binary protocol.
@@ -2522,6 +2522,16 @@ static bool check_prepared_statement(Prepared_statement *stmt)
       DBUG_RETURN(FALSE);
     }
     break;
+  case SQLCOM_SHOW_BINLOG_EVENTS:
+  case SQLCOM_SHOW_RELAYLOG_EVENTS:
+    {
+      List<Item> field_list;
+      Log_event::init_show_field_list(thd, &field_list);
+
+      if ((res= send_stmt_metadata(thd, stmt, &field_list)) == 2)
+        DBUG_RETURN(FALSE);
+    }
+  break;
 #endif /* EMBEDDED_LIBRARY */
   case SQLCOM_SHOW_CREATE_PROC:
     if ((res= mysql_test_show_create_routine(stmt, TYPE_ENUM_PROCEDURE)) == 2)
@@ -4278,7 +4288,7 @@ bool Prepared_statement::prepare(const char *packet, uint packet_len)
   if (thd->transaction_rollback_request)
   {
     trans_rollback_implicit(thd);
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
   }
 
   /* Preserve CHANGE MASTER attributes */

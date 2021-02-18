@@ -11929,10 +11929,6 @@ void JOIN_TAB::cleanup()
 {
   DBUG_ENTER("JOIN_TAB::cleanup");
   
-  if (tab_list && tab_list->is_with_table_recursive_reference() &&
-    tab_list->with->is_cleaned())
-  DBUG_VOID_RETURN;
-
   DBUG_PRINT("enter", ("tab: %p  table %s.%s",
                        this,
                        (table ? table->s->db.str : "?"),
@@ -12275,6 +12271,9 @@ void JOIN::join_free()
   for (tmp_unit= select_lex->first_inner_unit();
        tmp_unit;
        tmp_unit= tmp_unit->next_unit())
+  {
+    if (tmp_unit->with_element && tmp_unit->with_element->is_recursive)
+      continue;
     for (sl= tmp_unit->first_select(); sl; sl= sl->next_select())
     {
       Item_subselect *subselect= sl->master_unit()->item;
@@ -12292,7 +12291,7 @@ void JOIN::join_free()
       /* Can't unlock if at least one JOIN is still needed */
       can_unlock= can_unlock && full_local;
     }
-
+  }
   /*
     We are not using tables anymore
     Unlock all tables. We may be in an INSERT .... SELECT statement.
@@ -22464,7 +22463,7 @@ cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref)
 {
   enum enum_check_fields save_count_cuted_fields= thd->count_cuted_fields;
   thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-  my_bitmap_map *old_map= dbug_tmp_use_all_columns(table, table->write_set);
+  MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->write_set);
   bool result= 0;
 
   for (store_key **copy=ref->key_copy ; *copy ; copy++)
@@ -22476,7 +22475,7 @@ cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref)
     }
   }
   thd->count_cuted_fields= save_count_cuted_fields;
-  dbug_tmp_restore_column_map(table->write_set, old_map);
+  dbug_tmp_restore_column_map(&table->write_set, old_map);
   return result;
 }
 
@@ -26064,10 +26063,10 @@ JOIN::reoptimize(Item *added_where, table_map join_tables,
   if (save_to)
   {
     DBUG_ASSERT(!keyuse.elements);
-    memcpy(keyuse.buffer,
-           save_to->keyuse.buffer,
-           (size_t) save_to->keyuse.elements * keyuse.size_of_element);
     keyuse.elements= save_to->keyuse.elements;
+    if (size_t e= keyuse.elements)
+      memcpy(keyuse.buffer,
+             save_to->keyuse.buffer, e * keyuse.size_of_element);
   }
 
   /* Add the new access methods to the keyuse array. */

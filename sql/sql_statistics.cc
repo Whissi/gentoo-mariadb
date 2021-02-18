@@ -1044,9 +1044,8 @@ public:
   {
     char buff[MAX_FIELD_WIDTH];
     String val(buff, sizeof(buff), &my_charset_bin);
-    my_bitmap_map *old_map;
 
-    old_map= dbug_tmp_use_all_columns(stat_table, stat_table->read_set);
+    MY_BITMAP *old_map= dbug_tmp_use_all_columns(stat_table, &stat_table->read_set);
 
     for (uint i= COLUMN_STAT_MIN_VALUE; i <= COLUMN_STAT_HISTOGRAM; i++)
     {  
@@ -1105,7 +1104,7 @@ public:
         }
       }
     }
-    dbug_tmp_restore_column_map(stat_table->read_set, old_map);
+    dbug_tmp_restore_column_map(&stat_table->read_set, old_map);
   }
 
 
@@ -2110,6 +2109,10 @@ int alloc_statistics_for_table(THD* thd, TABLE *table)
   uint key_parts= table->s->ext_key_parts;
   ulonglong *idx_avg_frequency= (ulonglong*) alloc_root(&table->mem_root,
                                                sizeof(ulonglong) * key_parts);
+
+  if (table->file->ha_rnd_init(TRUE))
+    DBUG_RETURN(1);
+  table->file->ha_rnd_end();
 
   uint columns= 0;
   for (field_ptr= table->field; *field_ptr; field_ptr++)
