@@ -1721,7 +1721,7 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
   int error, trg_error= 0;
   char *key=0;
   MY_BITMAP *save_read_set, *save_write_set;
-  table->file->store_auto_increment();
+  ulonglong prev_insert_id= table->file->next_insert_id;
   ulonglong insert_id_for_cur_row= 0;
   ulonglong prev_insert_id_for_cur_row= 0;
   DBUG_ENTER("write_record");
@@ -1870,7 +1870,7 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
         if (res == VIEW_CHECK_ERROR)
           goto before_trg_err;
 
-        table->file->restore_auto_increment();
+        table->file->restore_auto_increment(prev_insert_id);
         info->touched++;
         if (different_records)
         {
@@ -1981,6 +1981,8 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
           if (likely(!error))
           {
             info->deleted++;
+            if (!table->file->has_transactions())
+              thd->transaction.stmt.modified_non_trans_table= TRUE;
             if (table->versioned(VERS_TIMESTAMP))
             {
               store_record(table, record[2]);
@@ -2064,7 +2066,7 @@ int write_record(THD *thd, TABLE *table,COPY_INFO *info)
     if (!(thd->variables.old_behavior &
           OLD_MODE_NO_DUP_KEY_WARNINGS_WITH_IGNORE))
       table->file->print_error(error, MYF(ME_WARNING));
-    table->file->restore_auto_increment();
+    table->file->restore_auto_increment(prev_insert_id);
     goto ok_or_after_trg_err;
   }
 
@@ -2087,7 +2089,7 @@ err:
   table->file->print_error(error,MYF(0));
   
 before_trg_err:
-  table->file->restore_auto_increment();
+  table->file->restore_auto_increment(prev_insert_id);
   if (key)
     my_safe_afree(key, table->s->max_unique_length);
   table->column_bitmaps_set(save_read_set, save_write_set);
@@ -2241,7 +2243,7 @@ public:
     if (table)
     {
       close_thread_tables(&thd);
-      thd.mdl_context.release_transactional_locks();
+      thd.mdl_context.release_transactional_locks(&thd);
     }
     mysql_mutex_destroy(&mutex);
     mysql_cond_destroy(&cond);
@@ -2701,7 +2703,7 @@ int write_delayed(THD *thd, TABLE *table, enum_duplicates duplic,
   delayed_row *row= 0;
   Delayed_insert *di=thd->di;
   const Discrete_interval *forced_auto_inc;
-  size_t user_len, host_len, ip_len;
+  size_t user_len, host_len, ip_length;
   DBUG_ENTER("write_delayed");
   DBUG_PRINT("enter", ("query = '%s' length %lu", query.str,
                        (ulong) query.length));
@@ -2735,7 +2737,7 @@ int write_delayed(THD *thd, TABLE *table, enum_duplicates duplic,
     goto err;
   }
 
-  user_len= host_len= ip_len= 0;
+  user_len= host_len= ip_length= 0;
   row->user= row->host= row->ip= NULL;
   if (thd->security_ctx)
   {
@@ -2744,11 +2746,11 @@ int write_delayed(THD *thd, TABLE *table, enum_duplicates duplic,
     if (thd->security_ctx->host)
       host_len= strlen(thd->security_ctx->host) + 1;
     if (thd->security_ctx->ip)
-      ip_len= strlen(thd->security_ctx->ip) + 1;
+      ip_length= strlen(thd->security_ctx->ip) + 1;
   }
   /* This can't be THREAD_SPECIFIC as it's freed in delayed thread */
   if (!(row->record= (char*) my_malloc(table->s->reclength +
-                                       user_len + host_len + ip_len,
+                                       user_len + host_len + ip_length,
                                        MYF(MY_WME))))
     goto err;
   memcpy(row->record, table->record[0], table->s->reclength);
@@ -2768,7 +2770,7 @@ int write_delayed(THD *thd, TABLE *table, enum_duplicates duplic,
     if (thd->security_ctx->ip)
     {
       row->ip= row->record + table->s->reclength + user_len + host_len;
-      memcpy(row->ip, thd->security_ctx->ip, ip_len);
+      memcpy(row->ip, thd->security_ctx->ip, ip_length);
     }
   }
   row->query_id= thd->query_id;
@@ -2867,23 +2869,7 @@ void kill_delayed_threads(void)
     mysql_mutex_lock(&di->thd.LOCK_thd_kill);
     if (di->thd.killed < KILL_CONNECTION)
       di->thd.set_killed_no_mutex(KILL_CONNECTION);
-    if (di->thd.mysys_var)
-    {
-      mysql_mutex_lock(&di->thd.mysys_var->mutex);
-      if (di->thd.mysys_var->current_cond)
-      {
-	/*
-	  We need the following test because the main mutex may be locked
-	  in handle_delayed_insert()
-	*/
-	if (&di->mutex != di->thd.mysys_var->current_mutex)
-          mysql_mutex_lock(di->thd.mysys_var->current_mutex);
-        mysql_cond_broadcast(di->thd.mysys_var->current_cond);
-	if (&di->mutex != di->thd.mysys_var->current_mutex)
-          mysql_mutex_unlock(di->thd.mysys_var->current_mutex);
-      }
-      mysql_mutex_unlock(&di->thd.mysys_var->mutex);
-    }
+    di->thd.abort_current_cond_wait(false);
     mysql_mutex_unlock(&di->thd.LOCK_thd_kill);
   }
   mysql_mutex_unlock(&LOCK_delayed_insert); // For unlink from list
@@ -3061,7 +3047,7 @@ pthread_handler_t handle_delayed_insert(void *arg)
     if (thd->mdl_context.clone_ticket(&di->grl_protection) ||
         thd->mdl_context.clone_ticket(&di->table_list.mdl_request))
     {
-      thd->mdl_context.release_transactional_locks();
+      thd->release_transactional_locks();
       di->handler_thread_initialized= TRUE;
       goto err;
     }
@@ -3276,7 +3262,7 @@ pthread_handler_t handle_delayed_insert(void *arg)
     thd->set_killed(KILL_CONNECTION_HARD);	        // If error
 
     close_thread_tables(thd);			// Free the table
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
     mysql_cond_broadcast(&di->cond_client);       // Safety
 
     mysql_mutex_lock(&LOCK_delayed_create);    // Because of delayed_get_table
@@ -4766,6 +4752,7 @@ bool select_create::send_eof()
         WSREP_ERROR("Appending table key for CTAS failed: %s, %d",
                     (wsrep_thd_query(thd)) ?
                     wsrep_thd_query(thd) : "void", rcode);
+        abort_result_set();
         DBUG_RETURN(true);
       }
       /* If commit fails, we should be able to reset the OK status. */

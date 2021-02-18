@@ -1127,7 +1127,7 @@ bool parse_vcol_defs(THD *thd, MEM_ROOT *mem_root, TABLE *table,
   thd->stmt_arena= table->expr_arena;
   thd->update_charset(&my_charset_utf8mb4_general_ci, table->s->table_charset);
   expr_str.append(&parse_vcol_keyword);
-  thd->variables.sql_mode &= ~MODE_NO_BACKSLASH_ESCAPES;
+  thd->variables.sql_mode &= ~(MODE_NO_BACKSLASH_ESCAPES | MODE_EMPTY_STRING_IS_NULL);
 
   while (pos < end)
   {
@@ -3210,9 +3210,8 @@ ret:
   if (unlikely(thd->is_error() || error))
   {
     thd->clear_error();
-    my_error(ER_SQL_DISCOVER_ERROR, MYF(0),
-             plugin_name(db_plugin)->str, db.str, table_name.str,
-             sql_copy);
+    my_error(ER_SQL_DISCOVER_ERROR, MYF(0), hton_name(hton)->str,
+             db.str, table_name.str, sql_copy);
     DBUG_RETURN(HA_ERR_GENERIC);
   }
   /* Treat the table as normal table from binary logging point of view */
@@ -8499,7 +8498,7 @@ int TABLE::period_make_insert(Item *src, Field *dst)
 {
   THD *thd= in_use;
 
-  file->store_auto_increment();
+  ulonglong prev_insert_id= file->next_insert_id;
   store_record(this, record[1]);
   int res= src->save_in_field(dst, true);
 
@@ -8519,7 +8518,7 @@ int TABLE::period_make_insert(Item *src, Field *dst)
 
   restore_record(this, record[1]);
   if (res)
-    file->restore_auto_increment();
+    file->restore_auto_increment(prev_insert_id);
   return res;
 }
 

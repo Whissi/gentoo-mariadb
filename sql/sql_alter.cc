@@ -470,6 +470,26 @@ bool Sql_cmd_alter_table::execute(THD *thd)
 
   if (check_grant(thd, priv_needed, first_table, FALSE, UINT_MAX, FALSE))
     DBUG_RETURN(TRUE);                  /* purecov: inspected */
+#ifdef WITH_WSREP
+  if (WSREP(thd) && WSREP_CLIENT(thd) &&
+      (!thd->is_current_stmt_binlog_format_row() ||
+       !thd->find_temporary_table(first_table)))
+  {
+    wsrep::key_array keys;
+    wsrep_append_fk_parent_table(thd, first_table, &keys);
+
+    WSREP_TO_ISOLATION_BEGIN_ALTER((lex->name.str ? select_lex->db.str : NULL),
+                                   (lex->name.str ? lex->name.str : NULL),
+                                   first_table, &alter_info, &keys)
+    {
+      WSREP_WARN("ALTER TABLE isolation failure");
+      DBUG_RETURN(TRUE);
+    }
+
+    thd->variables.auto_increment_offset = 1;
+    thd->variables.auto_increment_increment = 1;
+  }
+#endif
 
   if (lex->name.str && !test_all_bits(priv, INSERT_ACL | CREATE_ACL))
   {
@@ -497,20 +517,6 @@ bool Sql_cmd_alter_table::execute(THD *thd)
   thd->work_part_info= 0;
 #endif
 
-#ifdef WITH_WSREP
-  if (WSREP(thd) &&
-      (!thd->is_current_stmt_binlog_format_row() ||
-       !thd->find_temporary_table(first_table)))
-  {
-    WSREP_TO_ISOLATION_BEGIN_ALTER((lex->name.str ? select_lex->db.str : NULL),
-                                   (lex->name.str ? lex->name.str : NULL),
-                                   first_table, &alter_info);
-
-    thd->variables.auto_increment_offset = 1;
-    thd->variables.auto_increment_increment = 1;
-  }
-#endif
-
   result= mysql_alter_table(thd, &select_lex->db, &lex->name,
                             &create_info,
                             first_table,
@@ -520,11 +526,6 @@ bool Sql_cmd_alter_table::execute(THD *thd)
                             lex->ignore);
 
   DBUG_RETURN(result);
-#ifdef WITH_WSREP
-wsrep_error_label:
-  WSREP_WARN("ALTER TABLE isolation failure");
-  DBUG_RETURN(TRUE);
-#endif
 }
 
 bool Sql_cmd_discard_import_tablespace::execute(THD *thd)

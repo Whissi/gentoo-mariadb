@@ -125,17 +125,12 @@ namespace wsrep
 
         bool is_xa() const
         {
-            return !xid_.empty();
+            return !xid_.is_null();
         }
 
-        void assign_xid(const wsrep::xid& xid)
-        {
-            assert(active());
-            assert(xid_.empty());
-            xid_ = xid;
-        }
+        void assign_xid(const wsrep::xid& xid);
 
-        const wsrep::xid xid() const
+        const wsrep::xid& xid() const
         {
             return xid_;
         }
@@ -143,6 +138,10 @@ namespace wsrep
         int restore_to_prepared_state(const wsrep::xid& xid);
 
         int commit_or_rollback_by_xid(const wsrep::xid& xid, bool commit);
+
+        void xa_detach();
+
+        int xa_replay(wsrep::unique_lock<wsrep::mutex>&);
 
         bool pa_unsafe() const { return pa_unsafe_; }
         void pa_unsafe(bool pa_unsafe) { pa_unsafe_ = pa_unsafe; }

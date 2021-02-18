@@ -829,7 +829,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 /*
   We should not introduce any further shift/reduce conflicts.
 */
-%expect 54
+%expect 68
 
 /*
    Comments for TOKENS.
@@ -1808,7 +1808,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 
 %type <type_handler> int_type real_type
 
-%type <Lex_field_type> type_with_opt_collate field_type
+%type <Lex_field_type> field_type field_type_all
         qualified_field_type
         field_type_numeric
         field_type_string
@@ -1879,7 +1879,7 @@ bool my_yyoverflow(short **a, YYSTYPE **b, size_t *yystacksize);
 %type <item>
         literal insert_ident order_ident temporal_literal
         simple_ident expr sum_expr in_sum_expr
-        variable variable_aux bool_pri
+        variable variable_aux
         predicate bit_expr parenthesized_expr
         table_wild simple_expr column_default_non_parenthesized_expr udf_expr
         primary_expr string_factor_expr mysql_concatenation_expr
@@ -2902,7 +2902,7 @@ create:
               MYSQL_YYABORT;
           }
         | create_or_replace USER_SYM opt_if_not_exists clear_privileges
-          grant_list opt_require_clause opt_resource_options opt_account_locking opt_password_expiration
+          grant_list opt_require_clause opt_resource_options opt_account_locking_and_opt_password_expiration
           {
             if (unlikely(Lex->set_command_with_check(SQLCOM_CREATE_USER,
                                                      $1 | $3)))
@@ -3392,7 +3392,7 @@ sp_param_name:
         ;
 
 sp_param_name_and_type:
-          sp_param_name type_with_opt_collate
+          sp_param_name field_type
           {
             if (unlikely(Lex->sp_param_fill_definition($$= $1)))
               MYSQL_YYABORT;
@@ -3522,7 +3522,7 @@ row_field_name:
         ;
 
 row_field_definition:
-          row_field_name type_with_opt_collate
+          row_field_name field_type
         ;
 
 row_field_definition_list:
@@ -3551,7 +3551,7 @@ sp_decl_idents_init_vars:
 
 sp_decl_variable_list:
           sp_decl_idents_init_vars
-          type_with_opt_collate
+          field_type
           sp_opt_default
           {
             if (unlikely(Lex->sp_variable_declarations_finalize(thd, $1,
@@ -6888,19 +6888,26 @@ column_default_expr:
           }
         ;
 
+field_type: field_type_all
+        {
+          Lex->map_data_type(Lex_ident_sys(), &($$= $1));
+          Lex->last_field->set_attributes($$, Lex->charset);
+        }
+        ;
+
 qualified_field_type:
-          field_type
+          field_type_all
           {
             Lex->map_data_type(Lex_ident_sys(), &($$= $1));
           }
-        | sp_decl_ident '.' field_type
+        | sp_decl_ident '.' field_type_all
           {
             if (Lex->map_data_type($1, &($$= $3)))
               MYSQL_YYABORT;
           }
         ;
 
-field_type:
+field_type_all:
           field_type_numeric
         | field_type_temporal
         | field_type_string
@@ -7363,20 +7370,6 @@ with_or_without_system:
         ;
 
 
-type_with_opt_collate:
-        field_type opt_collate
-        {
-          Lex->map_data_type(Lex_ident_sys(), &($$= $1));
-
-          if ($2)
-          {
-            if (unlikely(!(Lex->charset= merge_charset_and_collation(Lex->charset, $2))))
-              MYSQL_YYABORT;
-          }
-          Lex->last_field->set_attributes($$, Lex->charset);
-        }
-        ;
-
 charset:
           CHAR_SYM SET {}
         | CHARSET {}
@@ -7450,6 +7443,12 @@ charset_or_alias:
           }
         ;
 
+collate: COLLATE_SYM collation_name_or_default
+         {
+           Lex->charset= $2;
+         }
+       ;
+
 opt_binary:
           /* empty */             { bincmp_collation(NULL, false); }
         | binary {}
@@ -7460,6 +7459,13 @@ binary:
         | charset_or_alias opt_bin_mod { bincmp_collation($1, $2); }
         | BINARY                  { bincmp_collation(NULL, true); }
         | BINARY charset_or_alias { bincmp_collation($2, true); }
+        | charset_or_alias collate
+          {
+            if (!my_charset_same(Lex->charset, $1))
+              my_yyabort_error((ER_COLLATION_CHARSET_MISMATCH, MYF(0),
+                                Lex->charset->name, $1->csname));
+          }
+        | collate { }
         ;
 
 opt_bin_mod:
@@ -8032,7 +8038,7 @@ alter:
           } OPTIONS_SYM '(' server_options_list ')' { }
           /* ALTER USER foo is allowed for MySQL compatibility. */
         | ALTER USER_SYM opt_if_exists clear_privileges grant_list
-          opt_require_clause opt_resource_options opt_account_locking opt_password_expiration
+          opt_require_clause opt_resource_options opt_account_locking_and_opt_password_expiration
           {
             Lex->create_info.set($3);
             Lex->sql_command= SQLCOM_ALTER_USER;
@@ -8071,37 +8077,44 @@ alter:
           }
         ;
 
-opt_account_locking:
-        /* Nothing */ {}
-        | ACCOUNT_SYM LOCK_SYM
+account_locking_option:
+          LOCK_SYM
           {
             Lex->account_options.account_locked= ACCOUNTLOCK_LOCKED;
           }
-        | ACCOUNT_SYM UNLOCK_SYM
+        | UNLOCK_SYM
           {
             Lex->account_options.account_locked= ACCOUNTLOCK_UNLOCKED;
           }
         ;
-opt_password_expiration:
-        /* Nothing */ {}
-        | PASSWORD_SYM EXPIRE_SYM
+
+opt_password_expire_option:
+          /* empty */
           {
             Lex->account_options.password_expire= PASSWORD_EXPIRE_NOW;
           }
-        | PASSWORD_SYM EXPIRE_SYM NEVER_SYM
+        | NEVER_SYM
           {
             Lex->account_options.password_expire= PASSWORD_EXPIRE_NEVER;
           }
-        | PASSWORD_SYM EXPIRE_SYM DEFAULT
+        | DEFAULT
           {
             Lex->account_options.password_expire= PASSWORD_EXPIRE_DEFAULT;
           }
-        | PASSWORD_SYM EXPIRE_SYM INTERVAL_SYM NUM DAY_SYM
+        | INTERVAL_SYM NUM DAY_SYM
           {
             Lex->account_options.password_expire= PASSWORD_EXPIRE_INTERVAL;
-            if (!(Lex->account_options.num_expiration_days= atoi($4.str)))
-              my_yyabort_error((ER_WRONG_VALUE, MYF(0), "DAY", $4.str));
+            if (!(Lex->account_options.num_expiration_days= atoi($2.str)))
+              my_yyabort_error((ER_WRONG_VALUE, MYF(0), "DAY", $2.str));
           }
+        ;
+
+opt_account_locking_and_opt_password_expiration:
+          /* empty */
+        | ACCOUNT_SYM account_locking_option
+        | PASSWORD_SYM EXPIRE_SYM opt_password_expire_option
+        | ACCOUNT_SYM account_locking_option PASSWORD_SYM EXPIRE_SYM opt_password_expire_option
+        | PASSWORD_SYM EXPIRE_SYM opt_password_expire_option ACCOUNT_SYM account_locking_option
         ;
 
 ev_alter_on_schedule_completion:
@@ -10057,23 +10070,19 @@ expr:
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri
-        ;
-
-bool_pri:
-          bool_pri EQUAL_SYM predicate %prec EQUAL_SYM
+        | expr EQUAL_SYM predicate %prec EQUAL_SYM
           {
             $$= new (thd->mem_root) Item_func_equal(thd, $1, $3);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri comp_op predicate %prec '='
+        | expr comp_op predicate %prec '='
           {
             $$= (*$2)(0)->create(thd, $1, $3);
             if (unlikely($$ == NULL))
               MYSQL_YYABORT;
           }
-        | bool_pri comp_op all_or_any '(' subselect ')' %prec '='
+        | expr comp_op all_or_any '(' subselect ')' %prec '='
           {
             $$= all_any_subquery_creator(thd, $1, $2, $3, $5);
             if (unlikely($$ == NULL))
@@ -14986,7 +14995,7 @@ kill:
             lex->sql_command= SQLCOM_KILL;
             lex->kill_type= KILL_TYPE_ID;
           }
-          kill_type kill_option kill_expr
+          kill_type kill_option
           {
             Lex->kill_signal= (killed_state) ($3 | $4);
           }
@@ -14999,14 +15008,19 @@ kill_type:
         ;
 
 kill_option:
-          /* empty */    { $$= (int) KILL_CONNECTION; }
-        | CONNECTION_SYM { $$= (int) KILL_CONNECTION; }
-        | QUERY_SYM      { $$= (int) KILL_QUERY; }
-        | QUERY_SYM ID_SYM
+          opt_connection kill_expr { $$= (int) KILL_CONNECTION; }
+        | QUERY_SYM      kill_expr { $$= (int) KILL_QUERY; }
+        | QUERY_SYM ID_SYM expr
           {
             $$= (int) KILL_QUERY;
             Lex->kill_type= KILL_TYPE_QUERY;
+            Lex->value_list.push_front($3, thd->mem_root);
           }
+        ;
+
+opt_connection:
+          /* empty */    { }
+        | CONNECTION_SYM { }
         ;
 
 kill_expr:
@@ -15020,7 +15034,6 @@ kill_expr:
             Lex->kill_type= KILL_TYPE_USER;
           }
         ;
-
 
 shutdown:
         SHUTDOWN { Lex->sql_command= SQLCOM_SHUTDOWN; }
@@ -18021,7 +18034,7 @@ sf_return_type:
                                  &empty_clex_str,
                                  thd->variables.collation_database);
           }
-          type_with_opt_collate
+          field_type
           {
             if (unlikely(Lex->sphead->fill_field_definition(thd,
                                                             Lex->last_field)))

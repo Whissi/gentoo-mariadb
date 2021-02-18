@@ -326,6 +326,8 @@ int wsrep::transaction::before_prepare(
             {
                 // Force fragment replication on XA prepare
                 flags(flags() | wsrep::provider::flag::prepare);
+                flags(flags() | wsrep::provider::flag::pa_unsafe);
+                append_sr_keys_for_commit();
                 const bool force_streaming_step = true;
                 ret = streaming_step(lock, force_streaming_step);
                 if (ret == 0)
@@ -337,11 +339,12 @@ int wsrep::transaction::before_prepare(
             else
             {
                 ret = certify_commit(lock);
-                assert((ret == 0 && state() == s_preparing) ||
-                       (state() == s_must_abort ||
-                        state() == s_must_replay ||
-                        state() == s_cert_failed));
             }
+
+            assert((ret == 0 && state() == s_preparing) ||
+                   (state() == s_must_abort ||
+                    state() == s_must_replay ||
+                    state() == s_cert_failed));
 
             if (ret)
             {
@@ -357,7 +360,12 @@ int wsrep::transaction::before_prepare(
         // context for high priority mode.
         if (is_xa())
         {
-            assert(state() == s_executing);
+            assert(state() == s_executing ||
+                   state() == s_replaying);
+            if (state() == s_replaying)
+            {
+                break;
+            }
         }
         state(lock, s_preparing);
         break;
@@ -367,6 +375,7 @@ int wsrep::transaction::before_prepare(
     }
 
     assert(state() == s_preparing ||
+           (is_xa() && state() == s_replaying) ||
            (ret && (state() == s_must_abort ||
                     state() == s_must_replay ||
                     state() == s_cert_failed ||
@@ -380,13 +389,30 @@ int wsrep::transaction::after_prepare(
 {
     assert(lock.owns_lock());
 
+    int ret = 0;
     debug_log_state("after_prepare_enter");
     if (is_xa())
     {
-        assert(state() == s_preparing);
-        assert(client_state_.mode() == wsrep::client_state::m_local ||
-               (certified() && ordered()));
-        state(lock, s_prepared);
+        switch (state())
+        {
+        case s_preparing:
+            assert(client_state_.mode() == wsrep::client_state::m_local ||
+                   (certified() && ordered()));
+            state(lock, s_prepared);
+            break;
+        case s_must_abort:
+            // prepared locally, but client has not received
+            // a result yet. We can still abort.
+            assert(client_state_.mode() == wsrep::client_state::m_local);
+            client_state_.override_error(wsrep::e_deadlock_error);
+            ret = 1;
+            break;
+        case s_replaying:
+            assert(client_state_.mode() == wsrep::client_state::m_high_priority);
+            break;
+        default:
+            assert(0);
+        }
     }
     else
     {
@@ -397,12 +423,15 @@ int wsrep::transaction::after_prepare(
         {
             assert(client_state_.mode() == wsrep::client_state::m_local);
             state(lock, s_must_replay);
-            return 1;
+            ret = 1;
         }
-        state(lock, s_committing);
+        else
+        {
+            state(lock, s_committing);
+        }
     }
     debug_log_state("after_prepare_leave");
-    return 0;
+    return ret;
 }
 
 int wsrep::transaction::before_commit()
@@ -423,30 +452,22 @@ int wsrep::transaction::before_commit()
     switch (client_state_.mode())
     {
     case wsrep::client_state::m_local:
-        if (state() == s_prepared)
-        {
-            assert(is_xa());
-            ret = certify_commit(lock);
-            assert((ret == 0 && state() == s_committing) ||
-                   (state() == s_must_abort ||
-                    state() == s_must_replay ||
-                    state() == s_cert_failed ||
-                    state() == s_prepared));
-        }
-        else if (state() == s_executing)
+        if (state() == s_executing)
         {
             ret = before_prepare(lock) || after_prepare(lock);
-            assert((ret == 0 && state() == s_committing)
+            assert((ret == 0 &&
+                    (state() == s_committing || state() == s_prepared))
                    ||
                    (state() == s_must_abort ||
                     state() == s_must_replay ||
                     state() == s_cert_failed ||
                     state() == s_aborted));
         }
-        else if (state() != s_committing)
+        else if (state() != s_committing && state() != s_prepared)
         {
             assert(state() == s_must_abort);
-            if (certified())
+            if (certified() ||
+                (is_xa() && is_streaming()))
             {
                 state(lock, s_must_replay);
             }
@@ -460,6 +481,17 @@ int wsrep::transaction::before_commit()
             // 2PC commit, prepare was done before
             ret = 0;
         }
+
+        if (ret == 0 && state() == s_prepared)
+        {
+            ret = certify_commit(lock);
+            assert((ret == 0 && state() == s_committing) ||
+                   (state() == s_must_abort ||
+                    state() == s_must_replay ||
+                    state() == s_cert_failed ||
+                    state() == s_prepared));
+        }
+
         if (ret == 0)
         {
             assert(certified());
@@ -491,12 +523,14 @@ int wsrep::transaction::before_commit()
     case wsrep::client_state::m_high_priority:
         assert(certified());
         assert(ordered());
-        if (state() == s_prepared)
+        if (is_xa())
         {
+            assert(state() == s_prepared ||
+                   state() == s_replaying);
             state(lock, s_committing);
+            ret = 0;
         }
-
-        if (state() == s_executing || state() == s_replaying)
+        else if (state() == s_executing || state() == s_replaying)
         {
             ret = before_prepare(lock) || after_prepare(lock);
         }
@@ -813,13 +847,21 @@ int wsrep::transaction::after_statement()
         // Fall through
     case s_must_replay:
     {
-        ret = replay(lock);
+        if (is_xa() && !ordered())
+        {
+            ret = xa_replay(lock);
+        }
+        else
+        {
+            ret = replay(lock);
+        }
         break;
     }
     case s_aborted:
         // Raise a deadlock error if the transaction was BF aborted and
         // rolled back by client outside of transaction hooks.
-        if (bf_aborted() && client_state_.current_error() == wsrep::e_success)
+        if (bf_aborted() && client_state_.current_error() == wsrep::e_success &&
+            !client_service_.is_xa_rollback())
         {
             client_state_.override_error(wsrep::e_deadlock_error);
         }
@@ -846,7 +888,9 @@ int wsrep::transaction::after_statement()
         lock.lock();
     }
 
-    if (state() != s_executing && state() != s_prepared)
+    if (state() != s_executing &&
+        (!client_service_.is_explicit_xa() ||
+         client_state_.state() == wsrep::client_state::s_quitting))
     {
         cleanup();
     }
@@ -904,6 +948,7 @@ bool wsrep::transaction::bf_abort(
         {
         case s_executing:
         case s_preparing:
+        case s_prepared:
         case s_certifying:
         case s_committing:
         {
@@ -968,18 +1013,25 @@ bool wsrep::transaction::bf_abort(
         {
             // We need to change the state to aborting under the
             // lock protection to avoid a race between client thread,
-            // otherwise it could happend that the client gains control
+            // otherwise it could happen that the client gains control
             // between releasing the lock and before background
             // rollbacker gets control.
-            state(lock, wsrep::transaction::s_aborting);
-            client_state_.set_rollbacker_active(true);
-
-            if (client_state_.mode() == wsrep::client_state::m_high_priority)
+            if (is_xa() && state_at_enter == s_prepared)
             {
-                lock.unlock();
-                client_state_.server_state().stop_streaming_applier(
-                    server_id_, id_);
-                lock.lock();
+                state(lock, s_must_replay);
+                client_state_.set_rollbacker_active(true);
+            }
+            else
+            {
+                state(lock, s_aborting);
+                client_state_.set_rollbacker_active(true);
+                if (client_state_.mode() == wsrep::client_state::m_high_priority)
+                {
+                    lock.unlock();
+                    client_state_.server_state().stop_streaming_applier(
+                        server_id_, id_);
+                    lock.lock();
+                }
             }
 
             lock.unlock();
@@ -1005,10 +1057,19 @@ void wsrep::transaction::clone_for_replay(const wsrep::transaction& other)
 {
     assert(other.state() == s_replaying);
     id_ = other.id_;
+    xid_ = other.xid_;
+    server_id_ = other.server_id_;
     ws_handle_ = other.ws_handle_;
     ws_meta_ = other.ws_meta_;
     streaming_context_ = other.streaming_context_;
     state_ = s_replaying;
+}
+
+void wsrep::transaction::assign_xid(const wsrep::xid& xid)
+{
+    assert(active());
+    assert(!is_xa());
+    xid_ = xid;
 }
 
 int wsrep::transaction::restore_to_prepared_state(const wsrep::xid& xid)
@@ -1016,9 +1077,16 @@ int wsrep::transaction::restore_to_prepared_state(const wsrep::xid& xid)
     wsrep::unique_lock<wsrep::mutex> lock(client_state_.mutex_);
     assert(active());
     assert(is_empty());
-    assert(state() == s_executing);
+    assert(state() == s_executing || state() == s_replaying);
     flags(flags() & ~wsrep::provider::flag::start_transaction);
-    state(lock, s_certifying);
+    if (state() == s_executing)
+    {
+        state(lock, s_certifying);
+    }
+    else
+    {
+        state(lock, s_preparing);
+    }
     state(lock, s_prepared);
     xid_ = xid;
     return 0;
@@ -1027,6 +1095,7 @@ int wsrep::transaction::restore_to_prepared_state(const wsrep::xid& xid)
 int wsrep::transaction::commit_or_rollback_by_xid(const wsrep::xid& xid,
                                                   bool commit)
 {
+    debug_log_state("commit_or_rollback_by_xid enter");
     wsrep::unique_lock<wsrep::mutex> lock(client_state_.mutex_);
     wsrep::server_state& server_state(client_state_.server_state());
     wsrep::high_priority_service* sa(server_state.find_streaming_applier(xid));
@@ -1059,6 +1128,7 @@ int wsrep::transaction::commit_or_rollback_by_xid(const wsrep::xid& xid,
                            flags,
                            meta));
 
+    int ret;
     if (cert_ret == wsrep::provider::success)
     {
         if (commit)
@@ -1072,16 +1142,99 @@ int wsrep::transaction::commit_or_rollback_by_xid(const wsrep::xid& xid,
             state(lock, s_aborting);
             state(lock, s_aborted);
         }
-        return 0;
+        ret = 0;
     }
     else
     {
-        client_state_.override_error(wsrep::e_error_during_commit);
+        client_state_.override_error(wsrep::e_error_during_commit,
+                                     cert_ret);
         wsrep::log_error() << "Failed to commit_or_rollback_by_xid,"
                            << " xid: " << xid
                            << " error: " << cert_ret;
-        return 1;
+        ret = 1;
     }
+    debug_log_state("commit_or_rollback_by_xid leave");
+    return ret;
+}
+
+void wsrep::transaction::xa_detach()
+{
+    debug_log_state("xa_detach enter");
+    assert(state() == s_prepared);
+    wsrep::server_state& server_state(client_state_.server_state());
+    server_state.convert_streaming_client_to_applier(&client_state_);
+    client_service_.store_globals();
+    client_service_.cleanup_transaction();
+    wsrep::unique_lock<wsrep::mutex> lock(client_state_.mutex_);
+    streaming_context_.cleanup();
+    state(lock, s_aborting);
+    state(lock, s_aborted);
+    provider().release(ws_handle_);
+    cleanup();
+    debug_log_state("xa_detach leave");
+}
+
+int wsrep::transaction::xa_replay(wsrep::unique_lock<wsrep::mutex>& lock)
+{
+    debug_log_state("xa_replay enter");
+    assert(lock.owns_lock());
+    assert(is_xa());
+    assert(is_streaming());
+    assert(state() == s_must_replay);
+    assert(bf_aborted());
+
+    state(lock, s_replaying);
+
+    enum wsrep::provider::status status;
+    wsrep::server_state& server_state(client_state_.server_state());
+
+    lock.unlock();
+    server_state.convert_streaming_client_to_applier(&client_state_);
+    status = client_service_.replay_unordered();
+    client_service_.store_globals();
+    lock.lock();
+
+    if (status != wsrep::provider::success)
+    {
+        client_service_.emergency_shutdown();
+    }
+
+    int ret(1);
+    if (bf_abort_client_state_ == wsrep::client_state::s_idle)
+    {
+        state(lock, s_aborted);
+        streaming_context_.cleanup();
+        provider().release(ws_handle_);
+        cleanup();
+        ret = 0;
+    }
+    else
+    {
+        lock.unlock();
+        enum wsrep::provider::status status(client_service_.commit_by_xid());
+        lock.lock();
+        switch (status)
+        {
+        case wsrep::provider::success:
+            state(lock, s_committed);
+            streaming_context_.cleanup();
+            provider().release(ws_handle_);
+            cleanup();
+            ret = 0;
+            break;
+        default:
+            log_warning() << "Failed to commit by xid during replay";
+            // Commit by xid failed, return a commit
+            // error and let the client retry
+            state(lock, s_preparing);
+            state(lock, s_prepared);
+            client_state_.override_error(wsrep::e_error_during_commit, status);
+        }
+    }
+
+    client_service_.signal_replayed();
+    debug_log_state("xa_replay leave");
+    return ret;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1106,16 +1259,18 @@ void wsrep::transaction::state(
 
     assert(lock.owns_lock());
     // BF aborter is allowed to change the state without gaining control
-    // to the state if the next state is s_must_abort or s_aborting.
+    // to the state if the next state is s_must_abort, s_aborting or
+    // s_must_replay (for xa idle replay).
     assert(client_state_.owning_thread_id_ == wsrep::this_thread::get_id() ||
            next_state == s_must_abort ||
+           next_state == s_must_replay ||
            next_state == s_aborting);
 
     static const char allowed[n_states][n_states] =
         { /*  ex pg pd ce co oc ct cf ma ab ad mr re */
             { 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0}, /* ex */
             { 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0}, /* pg */
-            { 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0}, /* pd */
+            { 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0}, /* pd */
             { 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0}, /* ce */
             { 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0}, /* co */
             { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0}, /* oc */
@@ -1256,6 +1411,7 @@ int wsrep::transaction::certify_fragment(
 
     state(lock, s_certifying);
     lock.unlock();
+    client_service_.debug_sync("wsrep_before_fragment_certification");
 
     wsrep::mutable_buffer data;
     size_t log_position(0);
@@ -1283,6 +1439,20 @@ int wsrep::transaction::certify_fragment(
         state(lock, s_must_abort);
         client_state_.override_error(wsrep::e_error_during_commit);
         return 1;
+    }
+
+    if (is_xa())
+    {
+        // One more check to see if the transaction
+        // has been aborted. This is necessary because
+        // until the append_data above will make sure
+        // that the transaction exists in provider.
+        lock.lock();
+        if (abort_or_interrupt(lock))
+        {
+            return 1;
+        }
+        lock.unlock();
     }
 
     if (is_streaming() == false)
@@ -1464,6 +1634,10 @@ int wsrep::transaction::certify_commit(
 
     if (abort_or_interrupt(lock))
     {
+        if (is_xa() && state() == s_must_abort)
+        {
+            state(lock, s_must_replay);
+        }
         return 1;
     }
 
@@ -1472,7 +1646,10 @@ int wsrep::transaction::certify_commit(
 
     if (is_streaming())
     {
-        append_sr_keys_for_commit();
+        if (!is_xa())
+        {
+            append_sr_keys_for_commit();
+        }
         flags(flags() | wsrep::provider::flag::pa_unsafe);
     }
 
@@ -1582,6 +1759,10 @@ int wsrep::transaction::certify_commit(
         // to reduce number of error state combinations elsewhere.
         if (state() == s_must_abort)
         {
+            if (is_xa())
+            {
+                state(lock, s_must_replay);
+            }
             client_state_.override_error(wsrep::e_deadlock_error);
         }
         else
@@ -1706,6 +1887,7 @@ int wsrep::transaction::replay(wsrep::unique_lock<wsrep::mutex>& lock)
     lock.unlock();
     client_service_.debug_sync("wsrep_before_replay");
     enum wsrep::provider::status replay_ret(client_service_.replay());
+    client_service_.signal_replayed();
     if (was_streaming)
     {
         client_state_.server_state_.stop_streaming_client(&client_state_);
@@ -1755,9 +1937,9 @@ void wsrep::transaction::clear_fragments()
 
 void wsrep::transaction::cleanup()
 {
+    debug_log_state("cleanup_enter");
     assert(is_streaming() == false);
     assert(state() == s_committed || state() == s_aborted);
-    debug_log_state("cleanup_enter");
     id_ = wsrep::transaction_id::undefined();
     ws_handle_ = wsrep::ws_handle();
     // Keep the state history for troubleshooting. Reset

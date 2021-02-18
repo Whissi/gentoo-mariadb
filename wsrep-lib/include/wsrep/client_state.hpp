@@ -193,6 +193,13 @@ namespace wsrep
          * The state is changed to s_none.
          */
         void cleanup();
+
+        /**
+         * Overload of cleanup() method which takes lock as argument.
+         * This method does not release the lock during execution, but
+         * the lock is needed for debug build sanity checks.
+         */
+        void cleanup(wsrep::unique_lock<wsrep::mutex>& lock);
         /** @} */
 
         /** @name Client command handling */
@@ -202,14 +209,38 @@ namespace wsrep
          * received from DBMS client starts.
          *
          * This method will wait until the possible synchronous
-         * rollback for associated transaction has finished.
+         * rollback for associated transaction has finished unless
+         * wait_rollback_complete_and_acquire_ownership() has been
+         * called before.
+         *
          * The method has a side effect of changing the client
          * context state to executing.
+         *
+         * The value set by keep_command_error has an effect on
+         * how before_command() behaves when it is entered after
+         * background rollback has been processed:
+         *
+         * - If keep_command_error is set true, the current error
+         *   is set and success will be returned.
+         * - If keep_command_error is set false, the transaction is
+         *   cleaned up and the return value will be non-zero to
+         *   indicate error.
+         *
+         * @param keep_command_error Make client state to preserve error
+         *        state in command hooks.
+         *        This is needed if a current command is not supposed to
+         *        return an error status to the client and the protocol must
+         *        advance until the next client command to return error status.
          *
          * @return Zero in case of success, non-zero in case of the
          *         associated transaction was BF aborted.
          */
-        int before_command();
+        int before_command(bool keep_command_error);
+
+        int before_command()
+        {
+            return before_command(false);
+        }
 
         /**
          * This method should be called before returning
@@ -587,6 +618,40 @@ namespace wsrep
         int rollback_by_xid(const wsrep::xid& xid)
         {
             return transaction_.commit_or_rollback_by_xid(xid, false);
+        }
+
+        /**
+         * Detach a prepared XA transaction
+         *
+         * This method cleans up a local XA transaction in prepared state
+         * and converts it to high priority mode.
+         * This can be used to handle the case where the client of a XA
+         * transaction disconnects, and the transaction must not rollback.
+         * After this call, a different client may later attempt to terminate
+         * the transaction by calling method commit_by_xid() or rollback_by_xid().
+         */
+        void xa_detach()
+        {
+            assert(mode_ == m_local);
+            assert(state_ == s_none || state_ == s_exec);
+            transaction_.xa_detach();
+        }
+
+        /**
+         * Replay a XA transaction
+         *
+         * Replay a XA transaction that is in s_idle state.
+         * This may happen if the transaction is BF aborted
+         * between prepare and commit.
+         * Since the victim is idle, this method can be called
+         * by the BF aborter or the backround rollbacker.
+         */
+        void xa_replay()
+        {
+            assert(mode_ == m_local);
+            assert(state_ == s_idle);
+            wsrep::unique_lock<wsrep::mutex> lock(mutex_);
+            transaction_.xa_replay(lock);
         }
 
         //
@@ -979,6 +1044,7 @@ namespace wsrep
             , debug_log_level_(0)
             , current_error_(wsrep::e_success)
             , current_error_status_(wsrep::provider::success)
+            , keep_command_error_()
         { }
 
     private:
@@ -1041,6 +1107,7 @@ namespace wsrep
         int debug_log_level_;
         enum wsrep::client_error current_error_;
         enum wsrep::provider::status current_error_status_;
+        bool keep_command_error_;
 
         /**
          * Marks external rollbacker thread for the client

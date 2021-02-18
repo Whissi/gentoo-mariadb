@@ -1024,9 +1024,8 @@ public:
   {
     char buff[MAX_FIELD_WIDTH];
     String val(buff, sizeof(buff), &my_charset_bin);
-    my_bitmap_map *old_map;
 
-    old_map= dbug_tmp_use_all_columns(stat_table, stat_table->read_set);
+    MY_BITMAP *old_map= dbug_tmp_use_all_columns(stat_table, &stat_table->read_set);
     for (uint i= COLUMN_STAT_MIN_VALUE; i <= COLUMN_STAT_HISTOGRAM; i++)
     {  
       Field *stat_field= stat_table->field[i];
@@ -1084,7 +1083,7 @@ public:
         }
       }
     }
-    dbug_tmp_restore_column_map(stat_table->read_set, old_map);
+    dbug_tmp_restore_column_map(&stat_table->read_set, old_map);
   }
 
 
@@ -2121,6 +2120,10 @@ int alloc_statistics_for_table(THD* thd, TABLE *table)
   ulonglong *idx_avg_frequency= (ulonglong*) alloc_root(&table->mem_root,
                                                sizeof(ulonglong) * key_parts);
 
+  if (table->file->ha_rnd_init(TRUE))
+    DBUG_RETURN(1);
+  table->file->ha_rnd_end();
+
   uint columns= 0;
   for (field_ptr= table->field; *field_ptr; field_ptr++)
   {
@@ -2893,7 +2896,6 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
   Field **field_ptr;
   KEY *key_info, *key_info_end;
   TABLE_SHARE *table_share= table->s;
-  enum_check_fields old_check_level= thd->count_cuted_fields;
 
   DBUG_ENTER("read_statistics_for_table");
   DEBUG_SYNC(thd, "statistics_mem_alloc_start1");
@@ -2909,7 +2911,7 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
   }
 
   /* Don't write warnings for internal field conversions */
-  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
+  Check_level_instant_set check_level_save(thd, CHECK_FIELD_IGNORE);
 
   /* Read statistics from the statistical table table_stats */
   Table_statistics *read_stats= table_share->stats_cb.table_stats;
@@ -2991,7 +2993,6 @@ int read_statistics_for_table(THD *thd, TABLE *table, TABLE_LIST *stat_tables)
     }
   }
 
-  thd->count_cuted_fields= old_check_level;
   table_share->stats_cb.end_stats_load();
   DBUG_RETURN(0);
 }

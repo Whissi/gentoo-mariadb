@@ -203,7 +203,7 @@ extern void wsrep_close_applier_threads(int count);
 
 /* new defines */
 extern void wsrep_stop_replication(THD *thd);
-extern bool wsrep_start_replication();
+extern bool wsrep_start_replication(const char *wsrep_cluster_address);
 extern void wsrep_shutdown_replication();
 extern bool wsrep_must_sync_wait (THD* thd, uint mask= WSREP_SYNC_WAIT_BEFORE_READ);
 extern bool wsrep_sync_wait (THD* thd, uint mask= WSREP_SYNC_WAIT_BEFORE_READ);
@@ -212,6 +212,7 @@ wsrep_sync_wait_upto (THD* thd, wsrep_gtid_t* upto, int timeout);
 extern void wsrep_last_committed_id (wsrep_gtid_t* gtid);
 extern int  wsrep_check_opts();
 extern void wsrep_prepend_PATH (const char* path);
+void wsrep_append_fk_parent_table(THD* thd, TABLE_LIST* table, wsrep::key_array* keys);
 
 /* Other global variables */
 extern wsrep_seqno_t wsrep_locked_seqno;
@@ -250,34 +251,41 @@ void WSREP_LOG(void (*fun)(const char* fmt, ...), const char* fmt, ...);
 #define WSREP_INFO(...)  WSREP_LOG(sql_print_information, ##__VA_ARGS__)
 #define WSREP_WARN(...)  WSREP_LOG(sql_print_warning,     ##__VA_ARGS__)
 #define WSREP_ERROR(...) WSREP_LOG(sql_print_error,       ##__VA_ARGS__)
+#define WSREP_UNKNOWN(fmt, ...) WSREP_ERROR("UNKNOWN: " fmt, ##__VA_ARGS__)
 
 #define WSREP_LOG_CONFLICT_THD(thd, role)                               \
-  WSREP_LOG(sql_print_information,                                      \
-            "%s: \n "                                                   \
-            "  THD: %lu, mode: %s, state: %s, conflict: %s, seqno: %lld\n " \
-            "  SQL: %s",                                                \
-            role,                                                       \
-            thd_get_thread_id(thd),                                     \
-            wsrep_thd_client_mode_str(thd),                             \
-            wsrep_thd_client_state_str(thd),                            \
-            wsrep_thd_transaction_state_str(thd),                       \
-            wsrep_thd_trx_seqno(thd),                                   \
-            wsrep_thd_query(thd)                                        \
+  WSREP_INFO("%s: \n "                                                  \
+             "  THD: %lu, mode: %s, state: %s, conflict: %s, seqno: %lld\n " \
+             "  SQL: %s",                                               \
+             role,                                                      \
+             thd_get_thread_id(thd),                                    \
+             wsrep_thd_client_mode_str(thd),                            \
+             wsrep_thd_client_state_str(thd),                           \
+             wsrep_thd_transaction_state_str(thd),                      \
+             wsrep_thd_trx_seqno(thd),                                  \
+             wsrep_thd_query(thd)                                       \
             );
 
 #define WSREP_LOG_CONFLICT(bf_thd, victim_thd, bf_abort)                \
   if (wsrep_debug || wsrep_log_conflicts)                               \
   {                                                                     \
-    WSREP_LOG(sql_print_information, "cluster conflict due to %s for threads:", \
-              (bf_abort) ? "high priority abort" : "certification failure" \
+    WSREP_INFO("cluster conflict due to %s for threads:",               \
+               (bf_abort) ? "high priority abort" : "certification failure" \
               );                                                        \
     if (bf_thd)     WSREP_LOG_CONFLICT_THD(bf_thd, "Winning thread");   \
     if (victim_thd) WSREP_LOG_CONFLICT_THD(victim_thd, "Victim thread"); \
-    WSREP_LOG(sql_print_information, "context: %s:%d", __FILE__, __LINE__); \
+    WSREP_INFO("context: %s:%d", __FILE__, __LINE__); \
   }
 
 #define WSREP_PROVIDER_EXISTS                                                  \
   (wsrep_provider && strncasecmp(wsrep_provider, WSREP_NONE, FN_REFLEN))
+
+static inline bool wsrep_cluster_address_exists()
+{
+  if (mysqld_server_started)
+    mysql_mutex_assert_owner(&LOCK_global_system_variables);
+  return wsrep_cluster_address && wsrep_cluster_address[0];
+}
 
 #define WSREP_QUERY(thd) (thd->query())
 
@@ -357,7 +365,7 @@ struct TABLE_LIST;
 class Alter_info;
 int wsrep_to_isolation_begin(THD *thd, const char *db_, const char *table_,
                              const TABLE_LIST* table_list,
-                             Alter_info* alter_info= NULL);
+                             Alter_info* alter_info= NULL, wsrep::key_array *fk_tables=NULL);
 
 void wsrep_to_isolation_end(THD *thd);
 
@@ -476,6 +484,9 @@ void wsrep_deinit_server();
  */
 enum wsrep::streaming_context::fragment_unit wsrep_fragment_unit(ulong unit);
 
+wsrep::key wsrep_prepare_key_for_toi(const char* db, const char* table,
+                                     enum wsrep::key::type type);
+
 #else /* !WITH_WSREP */
 
 /* These macros are needed to compile MariaDB without WSREP support
@@ -497,6 +508,7 @@ enum wsrep::streaming_context::fragment_unit wsrep_fragment_unit(ulong unit);
 #define wsrep_thr_deinit() do {} while(0)
 #define wsrep_init_globals() do {} while(0)
 #define wsrep_create_appliers(X) do {} while(0)
+#define wsrep_cluster_address_exists() (false)
 
 #endif /* WITH_WSREP */
 

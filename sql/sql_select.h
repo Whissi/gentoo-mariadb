@@ -1900,18 +1900,11 @@ public:
   {
     enum store_key_result result;
     THD *thd= to_field->table->in_use;
-    enum_check_fields saved_count_cuted_fields= thd->count_cuted_fields;
-    sql_mode_t orig_sql_mode= thd->variables.sql_mode;
+    Check_level_instant_set check_level_save(thd, CHECK_FIELD_IGNORE);
+    Sql_mode_save sql_mode(thd);
     thd->variables.sql_mode&= ~(MODE_NO_ZERO_IN_DATE | MODE_NO_ZERO_DATE);
     thd->variables.sql_mode|= MODE_INVALID_DATES;
-
-    thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-
     result= copy_inner();
-
-    thd->count_cuted_fields= saved_count_cuted_fields;
-    thd->variables.sql_mode= orig_sql_mode;
-
     return result;
   }
 
@@ -1955,8 +1948,8 @@ class store_key_field: public store_key
   enum store_key_result copy_inner()
   {
     TABLE *table= copy_field.to_field->table;
-    my_bitmap_map *old_map= dbug_tmp_use_all_columns(table,
-                                                     table->write_set);
+    MY_BITMAP *old_map= dbug_tmp_use_all_columns(table,
+                                                 &table->write_set);
 
     /* 
       It looks like the next statement is needed only for a simplified
@@ -1967,7 +1960,7 @@ class store_key_field: public store_key
     bzero(copy_field.to_ptr,copy_field.to_length);
 
     copy_field.do_copy(&copy_field);
-    dbug_tmp_restore_column_map(table->write_set, old_map);
+    dbug_tmp_restore_column_map(&table->write_set, old_map);
     null_key= to_field->is_null();
     return err != 0 ? STORE_KEY_FATAL : STORE_KEY_OK;
   }
@@ -2002,8 +1995,8 @@ public:
   enum store_key_result copy_inner()
   {
     TABLE *table= to_field->table;
-    my_bitmap_map *old_map= dbug_tmp_use_all_columns(table,
-                                                     table->write_set);
+    MY_BITMAP *old_map= dbug_tmp_use_all_columns(table,
+                                                 &table->write_set);
     int res= FALSE;
 
     /* 
@@ -2024,7 +2017,7 @@ public:
     */
     if (!res && table->in_use->is_error())
       res= 1; /* STORE_KEY_FATAL */
-    dbug_tmp_restore_column_map(table->write_set, old_map);
+    dbug_tmp_restore_column_map(&table->write_set, old_map);
     null_key= to_field->is_null() || item->null_value;
     return ((err != 0 || res < 0 || res > 2) ? STORE_KEY_FATAL : 
             (store_key_result) res);
@@ -2060,8 +2053,8 @@ protected:
     {
       inited=1;
       TABLE *table= to_field->table;
-      my_bitmap_map *old_map= dbug_tmp_use_all_columns(table,
-                                                       table->write_set);
+      MY_BITMAP *old_map= dbug_tmp_use_all_columns(table,
+                                                   &table->write_set);
       if ((res= item->save_in_field(to_field, 1)))
       {       
         if (!err)
@@ -2073,7 +2066,7 @@ protected:
         */
       if (!err && to_field->table->in_use->is_error())
         err= 1; /* STORE_KEY_FATAL */
-      dbug_tmp_restore_column_map(table->write_set, old_map);
+      dbug_tmp_restore_column_map(&table->write_set, old_map);
     }
     null_key= to_field->is_null() || item->null_value;
     return (err > 2 ? STORE_KEY_FATAL : (store_key_result) err);

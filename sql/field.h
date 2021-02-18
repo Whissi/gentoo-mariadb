@@ -1394,8 +1394,6 @@ public:
   virtual uint max_packed_col_length(uint max_length)
   { return max_length;}
 
-  virtual bool is_packable() const { return false; }
-
   uint offset(const uchar *record) const
   {
     return (uint) (ptr - record);
@@ -1872,7 +1870,7 @@ public:
 	    uchar null_bit_arg, utype unireg_check_arg,
 	    const LEX_CSTRING *field_name_arg,
 	    const DTCollation &collation);
-  uint decimals() const { return NOT_FIXED_DEC; }
+  uint decimals() const { return is_created_from_null_item ? 0 : NOT_FIXED_DEC; }
   int  save_in_field(Field *to) { return save_in_field_str(to); }
   bool memcpy_field_possible(const Field *from) const
   {
@@ -1988,7 +1986,6 @@ public:
   bool can_optimize_range(const Item_bool_func *cond,
                           const Item *item,
                           bool is_eq_func) const;
-  bool is_packable() const { return true; }
 };
 
 /* base class for float and double and decimal (old one) */

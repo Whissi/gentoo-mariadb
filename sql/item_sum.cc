@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2015, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2015, MariaDB
+   Copyright (c) 2008, 2020, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -472,7 +472,8 @@ Item_sum::Item_sum(THD *thd, Item_sum *item):
     if (!(orig_args= (Item**) thd->alloc(sizeof(Item*)*arg_count)))
       return;
   }
-  memcpy(orig_args, item->orig_args, sizeof(Item*)*arg_count);
+  if (arg_count)
+    memcpy(orig_args, item->orig_args, sizeof(Item*)*arg_count);
   init_aggregator();
   with_distinct= item->with_distinct;
   if (item->aggr)
@@ -1131,7 +1132,8 @@ Item_sum_num::fix_fields(THD *thd, Item **ref)
       check_sum_func(thd, ref))
     return TRUE;
 
-  memcpy (orig_args, args, sizeof (Item *) * arg_count);
+  if (arg_count)
+    memcpy (orig_args, args, sizeof (Item *) * arg_count);
   fixed= 1;
   return FALSE;
 }
@@ -1363,7 +1365,8 @@ Item_sum_sp::fix_fields(THD *thd, Item **ref)
   if (check_sum_func(thd, ref))
     return TRUE;
 
-  memcpy(orig_args, args, sizeof(Item *) * arg_count);
+  if (arg_count)
+    memcpy(orig_args, args, sizeof(Item *) * arg_count);
   fixed= 1;
   return FALSE;
 }
@@ -3616,7 +3619,7 @@ int dump_leaf_key(void* key_arg, element_count count __attribute__((unused)),
 {
   Item_func_group_concat *item= (Item_func_group_concat *) item_arg;
   TABLE *table= item->table;
-  uint max_length= (uint)table->in_use->variables.group_concat_max_len;
+  uint max_length= table->in_use->variables.group_concat_max_len;
   String tmp((char *)table->record[1], table->s->reclength,
              default_charset_info);
   String tmp2;
@@ -3779,7 +3782,8 @@ Item_func_group_concat(THD *thd, Name_resolution_context *context_arg,
 
   /* orig_args is only used for print() */
   orig_args= (Item**) (order + arg_count_order);
-  memcpy(orig_args, args, sizeof(Item*) * arg_count);
+  if (arg_count)
+    memcpy(orig_args, args, sizeof(Item*) * arg_count);
   if (limit_clause)
   {
     row_limit= row_limit_arg;
@@ -3956,7 +3960,7 @@ bool Item_func_group_concat::repack_tree(THD *thd)
   DBUG_ASSERT(tree->size_of_element == st.tree.size_of_element);
   st.table= table;
   st.len= 0;
-  st.maxlen= (size_t)thd->variables.group_concat_max_len;
+  st.maxlen= thd->variables.group_concat_max_len;
   tree_walk(tree, &copy_to_tree, &st, left_root_right);
   if (st.len <= st.maxlen) // Copying aborted. Must be OOM
   {
@@ -3977,7 +3981,7 @@ bool Item_func_group_concat::repack_tree(THD *thd)
   decreases up to N=10 (that is, factor=1024) and then starts to increase,
   again, very slowly.
 */
-#define GCONCAT_REPACK_FACTOR (1 << 10)
+#define GCONCAT_REPACK_FACTOR 10
 
 bool Item_func_group_concat::add()
 {
@@ -4023,7 +4027,7 @@ bool Item_func_group_concat::add()
   {
     THD *thd= table->in_use;
     table->field[0]->store(row_str_len, FALSE);
-    if (tree_len > thd->variables.group_concat_max_len * GCONCAT_REPACK_FACTOR
+    if ((tree_len >> GCONCAT_REPACK_FACTOR) > thd->variables.group_concat_max_len
         && tree->elements_in_tree > 1)
       if (repack_tree(thd))
         return 1;
@@ -4078,9 +4082,9 @@ Item_func_group_concat::fix_fields(THD *thd, Item **ref)
   result.set_charset(collation.collation);
   result_field= 0;
   null_value= 1;
-  max_length= (uint32)(thd->variables.group_concat_max_len
-              / collation.collation->mbminlen
-              * collation.collation->mbmaxlen);
+  max_length= (uint32)MY_MIN(thd->variables.group_concat_max_len
+                             / collation.collation->mbminlen
+                             * collation.collation->mbmaxlen, UINT_MAX32);
 
   uint32 offset;
   if (separator->needs_conversion(separator->length(), separator->charset(),

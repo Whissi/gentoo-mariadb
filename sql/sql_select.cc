@@ -1807,7 +1807,7 @@ int JOIN::init_join_caches()
 int
 JOIN::optimize_inner()
 {
-  DBUG_ENTER("JOIN::optimize");
+  DBUG_ENTER("JOIN::optimize_inner");
   subq_exit_fl= false;
   do_send_rows = (unit->select_limit_cnt) ? 1 : 0;
 
@@ -1879,6 +1879,10 @@ JOIN::optimize_inner()
   eval_select_list_used_tables();
 
   table_count= select_lex->leaf_tables.elements;
+
+  if (select_lex->options & OPTION_SCHEMA_TABLE &&
+      optimize_schema_tables_memory_usage(select_lex->leaf_tables))
+    DBUG_RETURN(1);
 
   if (setup_ftfuncs(select_lex)) /* should be after having->fix_fields */
     DBUG_RETURN(-1);
@@ -2093,7 +2097,7 @@ JOIN::optimize_inner()
             join->optimization_state == JOIN::OPTIMIZATION_PHASE_1_DONE &&
             join->with_two_phase_optimization)
           continue;
-        /* 
+        /*
           Do not push conditions from where into materialized inner tables
           of outer joins: this is not valid.
         */
@@ -2294,7 +2298,7 @@ setup_subq_exit:
   if (with_two_phase_optimization)
     optimization_state= JOIN::OPTIMIZATION_PHASE_1_DONE;
   else
-  { 
+  {
     if (optimize_stage2())
       DBUG_RETURN(1);
   }
@@ -2314,7 +2318,7 @@ int JOIN::optimize_stage2()
 
   if (unlikely(thd->check_killed()))
     DBUG_RETURN(1);
-  
+
   /* Generate an execution plan from the found optimal join order. */
   if (get_best_combination())
     DBUG_RETURN(1);
@@ -3961,7 +3965,7 @@ bool JOIN::setup_subquery_caches()
     if (tmp_having)
     {
       DBUG_ASSERT(having == NULL);
-      if (!(tmp_having= 
+      if (!(tmp_having=
             tmp_having->transform(thd,
                                   &Item::expr_cache_insert_transformer,
                                   NULL)))
@@ -6889,7 +6893,7 @@ update_ref_and_keys(THD *thd, DYNAMIC_ARRAY *keyuse,JOIN_TAB *join_tab,
   Special treatment for ft-keys.
 */
 
-bool sort_and_filter_keyuse(THD *thd, DYNAMIC_ARRAY *keyuse, 
+bool sort_and_filter_keyuse(THD *thd, DYNAMIC_ARRAY *keyuse,
                             bool skip_unprefixed_keyparts)
 {
   KEYUSE key_end, *prev, *save_pos, *use;
@@ -8060,7 +8064,7 @@ best_access_path(JOIN      *join,
   pos->use_join_buffer= best_uses_jbuf;
   pos->spl_plan= spl_plan;
   pos->range_rowid_filter_info= best_filter;
-   
+
   loose_scan_opt.save_to_position(s, loose_scan_pos);
 
   if (!best_key &&
@@ -10204,7 +10208,7 @@ bool JOIN::check_two_phase_optimization(THD *thd)
     return true;
   return false;
 }
-  
+
 
 bool JOIN::inject_cond_into_where(Item *injected_cond)
 {
@@ -10235,7 +10239,7 @@ bool JOIN::inject_cond_into_where(Item *injected_cond)
       and_args->push_back(elem, thd->mem_root);
     }
   }
-  
+
   return false;
 
 }
@@ -13363,10 +13367,6 @@ void JOIN_TAB::cleanup()
 {
   DBUG_ENTER("JOIN_TAB::cleanup");
   
-  if (tab_list && tab_list->is_with_table_recursive_reference() &&
-    tab_list->with->is_cleaned())
-  DBUG_VOID_RETURN;
-
   DBUG_PRINT("enter", ("tab: %p  table %s.%s",
                        this,
                        (table ? table->s->db.str : "?"),
@@ -13721,6 +13721,9 @@ void JOIN::join_free()
   for (tmp_unit= select_lex->first_inner_unit();
        tmp_unit;
        tmp_unit= tmp_unit->next_unit())
+  {
+    if (tmp_unit->with_element && tmp_unit->with_element->is_recursive)
+      continue;
     for (sl= tmp_unit->first_select(); sl; sl= sl->next_select())
     {
       Item_subselect *subselect= sl->master_unit()->item;
@@ -13738,7 +13741,7 @@ void JOIN::join_free()
       /* Can't unlock if at least one JOIN is still needed */
       can_unlock= can_unlock && full_local;
     }
-
+  }
   /*
     We are not using tables anymore
     Unlock all tables. We may be in an INSERT .... SELECT statement.
@@ -24032,9 +24035,8 @@ cmp_buffer_with_ref(THD *thd, TABLE *table, TABLE_REF *tab_ref)
 bool
 cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref)
 {
-  enum enum_check_fields save_count_cuted_fields= thd->count_cuted_fields;
-  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-  my_bitmap_map *old_map= dbug_tmp_use_all_columns(table, table->write_set);
+  Check_level_instant_set check_level_save(thd, CHECK_FIELD_IGNORE);
+  MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->write_set);
   bool result= 0;
 
   for (store_key **copy=ref->key_copy ; *copy ; copy++)
@@ -24045,8 +24047,7 @@ cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref)
       break;
     }
   }
-  thd->count_cuted_fields= save_count_cuted_fields;
-  dbug_tmp_restore_column_map(table->write_set, old_map);
+  dbug_tmp_restore_column_map(&table->write_set, old_map);
   return result;
 }
 
@@ -25717,7 +25718,7 @@ bool JOIN::rollup_init()
   {
     if (!(rollup.null_items[i]= new (thd->mem_root) Item_null_result(thd)))
       return true;
-    
+
     List<Item> *rollup_fields= &rollup.fields[i];
     rollup_fields->empty();
     rollup.ref_pointer_arrays[i]= Ref_ptr_array(ref_array, all_fields.elements);
@@ -26227,7 +26228,7 @@ bool JOIN_TAB::save_explain_data(Explain_table_access *eta,
   {
     JOIN_TAB *ctab= bush_children->start;
     /* table */
-    size_t len= my_snprintf(table_name_buffer, 
+    size_t len= my_snprintf(table_name_buffer,
                          sizeof(table_name_buffer)-1,
                          "<subquery%d>", 
                          ctab->emb_sj_nest->sj_subq_pred->get_identifier());
@@ -27402,7 +27403,7 @@ void TABLE_LIST::print(THD *thd, table_map eliminated_tables, String *str,
 void st_select_lex::print(THD *thd, String *str, enum_query_type query_type)
 {
   DBUG_ASSERT(thd);
-  
+
   if (tvc)
   {
     tvc->print(thd, str, query_type);
@@ -27798,10 +27799,10 @@ JOIN::reoptimize(Item *added_where, table_map join_tables,
   if (save_to)
   {
     DBUG_ASSERT(!keyuse.elements);
-    memcpy(keyuse.buffer,
-           save_to->keyuse.buffer,
-           (size_t) save_to->keyuse.elements * keyuse.size_of_element);
     keyuse.elements= save_to->keyuse.elements;
+    if (size_t e= keyuse.elements)
+      memcpy(keyuse.buffer,
+             save_to->keyuse.buffer, e * keyuse.size_of_element);
   }
 
   /* Add the new access methods to the keyuse array. */

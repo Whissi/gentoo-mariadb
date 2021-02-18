@@ -1887,13 +1887,8 @@ bool Field::compatible_field_size(uint field_metadata,
 int Field::store(const char *to, size_t length, CHARSET_INFO *cs,
                  enum_check_fields check_level)
 {
-  int res;
-  THD *thd= get_thd();
-  enum_check_fields old_check_level= thd->count_cuted_fields;
-  thd->count_cuted_fields= check_level;
-  res= store(to, length, cs);
-  thd->count_cuted_fields= old_check_level;
-  return res;
+  Check_level_instant_set check_level_save(get_thd(), check_level);
+  return store(to, length, cs);
 }
 
 
@@ -8103,11 +8098,10 @@ uint Field_varstring::get_key_image(uchar *buff, uint length,
 {
   String val;
   uint local_char_length;
-  my_bitmap_map *old_map;
 
-  old_map= dbug_tmp_use_all_columns(table, table->read_set);
+  MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->read_set);
   val_str(&val, &val);
-  dbug_tmp_restore_column_map(table->read_set, old_map);
+  dbug_tmp_restore_column_map(&table->read_set, old_map);
 
   local_char_length= val.charpos(length / field_charset->mbmaxlen);
   if (local_char_length < val.length())
@@ -8499,7 +8493,7 @@ int Field_blob::store(const char *from,size_t length,CHARSET_INFO *cs)
     DBUG_ASSERT(length <= max_data_length());
     
     new_length= length;
-    copy_length= (size_t)MY_MIN(UINT_MAX,table->in_use->variables.group_concat_max_len);
+    copy_length= table->in_use->variables.group_concat_max_len;
     if (new_length > copy_length)
     {
       new_length= Well_formed_prefix(cs,
@@ -8674,7 +8668,10 @@ int Field_blob::cmp_binary(const uchar *a_ptr, const uchar *b_ptr,
   b_length=get_length(b_ptr);
   if (b_length > max_length)
     b_length=max_length;
-  diff=memcmp(a,b,MY_MIN(a_length,b_length));
+  if (uint32 len= MY_MIN(a_length,b_length))
+    diff= memcmp(a,b,len);
+  else
+    diff= 0;
   return diff ? diff : (int) (a_length - b_length);
 }
 
@@ -8731,7 +8728,8 @@ uint Field_blob::get_key_image(uchar *buff,uint length, imagetype type_arg)
     length=(uint) blob_length;
   }
   int2store(buff,length);
-  memcpy(buff+HA_KEY_BLOB_LENGTH, blob, length);
+  if (length)
+    memcpy(buff+HA_KEY_BLOB_LENGTH, blob, length);
   return HA_KEY_BLOB_LENGTH+length;
 }
 
@@ -11397,7 +11395,7 @@ key_map Field::get_possible_keys()
 
 bool Field::validate_value_in_record_with_warn(THD *thd, const uchar *record)
 {
-  my_bitmap_map *old_map= dbug_tmp_use_all_columns(table, table->read_set);
+    MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->read_set);
   bool rc;
   if ((rc= validate_value_in_record(thd, record)))
   {
@@ -11409,7 +11407,7 @@ bool Field::validate_value_in_record_with_warn(THD *thd, const uchar *record)
                         ER_THD(thd, ER_INVALID_DEFAULT_VALUE_FOR_FIELD),
                         ErrConvString(&tmp).ptr(), field_name.str);
   }
-  dbug_tmp_restore_column_map(table->read_set, old_map);
+  dbug_tmp_restore_column_map(&table->read_set, old_map);
   return rc;
 }
 

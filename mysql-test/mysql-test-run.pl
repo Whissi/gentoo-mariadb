@@ -642,6 +642,7 @@ sub run_test_server ($$$) {
 	  # Client disconnected
 	  mtr_verbose("Child closed socket");
 	  $s->remove($sock);
+	  $sock->close;
 	  if (--$childs == 0){
 	    return ("Completed", $test_failure, $completed, $extra_warnings);
 	  }
@@ -811,6 +812,7 @@ sub run_test_server ($$$) {
             # Test failure due to warnings, force is off
             return ("Warnings in log", 1, $completed, $extra_warnings);
           }
+          next;
         }
 	elsif ($line =~ /^SPENT/) {
 	  add_total_times($line);
@@ -1161,7 +1163,7 @@ sub command_line_setup {
              'rr'                       => \$opt_rr,
              'rr-arg=s'                 => \@rr_record_args,
              'rr-dir=s'                 => \$opt_rr_dir,
-             'client-gdb'               => \$opt_client_gdb,
+             'client-gdb=s'             => \$opt_client_gdb,
              'manual-gdb'               => \$opt_manual_gdb,
              'manual-lldb'              => \$opt_manual_lldb,
 	     'boot-gdb'                 => \$opt_boot_gdb,
@@ -1259,7 +1261,7 @@ sub command_line_setup {
            );
 
   # fix options (that take an optional argument and *only* after = sign
-  my %fixopt = ( '--gdb' => '--gdb=#' );
+  my %fixopt = ( '--gdb' => '--gdb=#', '--client-gdb' => '--client-gdb=#' );
   @ARGV = map { $fixopt{$_} or $_ } @ARGV;
   GetOptions(%options) or usage("Can't read options");
   usage("") if $opt_usage;
@@ -3220,6 +3222,7 @@ sub mysql_install_db {
   mtr_add_arg($args, "--tmpdir=%s", "$opt_vardir/tmp/");
   mtr_add_arg($args, "--core-file");
   mtr_add_arg($args, "--console");
+  mtr_add_arg($args, "--character-set-server=latin1");
 
   if ( $opt_debug )
   {
@@ -4065,6 +4068,7 @@ sub run_testcase ($$) {
     if (start_servers($tinfo))
     {
       report_failure_and_restart($tinfo);
+      unlink $path_current_testlog;
       return 1;
     }
   }
@@ -5943,7 +5947,11 @@ sub gdb_arguments {
   $input = $input ? "< $input" : "";
 
   if ($type eq 'client') {
-    mtr_tofile($gdb_init_file, "set args @$$args $input");
+    mtr_tofile($gdb_init_file,
+      join("\n",
+        "set args @$$args $input",
+        split /;/, $opt_client_gdb || ""
+        ));
   } elsif ($opt_valgrind_mysqld) {
     my $v = $$exe;
     my $vargs = [];
