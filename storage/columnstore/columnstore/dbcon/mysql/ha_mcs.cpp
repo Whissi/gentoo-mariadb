@@ -381,7 +381,7 @@ int ha_mcs::end_bulk_insert()
 
     @see
 */
-int ha_mcs::update_row(const uchar* old_data, uchar* new_data)
+int ha_mcs::update_row(const uchar* old_data, const uchar* new_data)
 {
 
     DBUG_ENTER("ha_mcs::update_row");
@@ -1034,8 +1034,8 @@ int ha_mcs::rename_table(const char* from, const char* to)
   @see
   check_quick_keys() in opt_range.cc
 */
-ha_rows ha_mcs::records_in_range(uint32_t inx, key_range* min_key,
-                                     key_range* max_key)
+ha_rows ha_mcs::records_in_range(uint32_t inx, const key_range* min_key,
+                                     const key_range* max_key, page_range* res)
 {
     DBUG_ENTER("ha_mcs::records_in_range");
     DBUG_RETURN(10);                         // low number to force index usage
@@ -1868,6 +1868,8 @@ static int columnstore_init_func(void* p)
 #ifdef HAVE_PSI_INTERFACE
     uint count = sizeof(all_mutexes)/sizeof(all_mutexes[0]);
     mysql_mutex_register("ha_mcs_cache", all_mutexes, count);
+#else
+    (void)key_LOCK_cache_share;
 #endif
     mysql_mutex_init(key_LOCK_cache_share, &LOCK_cache_share, MY_MUTEX_INIT_FAST);
 
@@ -1918,7 +1920,7 @@ maria_declare_plugin(columnstore)
   MCSVERSIONHEX,
   mcs_status_variables,          /* status variables */
   mcs_system_variables,          /* system variables */
-  MCSVERSION,                    /* string version */
+  PLUGIN_COLUMNSTORE_VERSION,    /* string version */
   COLUMNSTORE_MATURITY           /* maturity */
 },
 {
@@ -1934,7 +1936,7 @@ maria_declare_plugin(columnstore)
     MCSVERSIONHEX,
     NULL,
     NULL,
-    MCSVERSION,
+    PLUGIN_COLUMNSTORE_VERSION,
     COLUMNSTORE_MATURITY
 },
 {
@@ -1950,7 +1952,7 @@ maria_declare_plugin(columnstore)
     MCSVERSIONHEX,
     NULL,
     NULL,
-    MCSVERSION,
+    PLUGIN_COLUMNSTORE_VERSION,
     COLUMNSTORE_MATURITY
 },
 {
@@ -1966,7 +1968,7 @@ maria_declare_plugin(columnstore)
     MCSVERSIONHEX,
     NULL,
     NULL,
-    MCSVERSION,
+    PLUGIN_COLUMNSTORE_VERSION,
     COLUMNSTORE_MATURITY
 },
 {
@@ -1982,7 +1984,7 @@ maria_declare_plugin(columnstore)
     MCSVERSIONHEX,
     NULL,
     NULL,
-    MCSVERSION,
+    PLUGIN_COLUMNSTORE_VERSION,
     COLUMNSTORE_MATURITY
 }
 maria_declare_plugin_end;

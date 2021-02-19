@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2009, Google Inc.
-Copyright (c) 2014, 2020, MariaDB Corporation.
+Copyright (c) 2014, 2021, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -920,7 +920,7 @@ ATTRIBUTE_COLD void log_write_checkpoint_info(lsn_t end_lsn)
 
 	DBUG_PRINT("ib_log", ("checkpoint ended at " LSN_PF
 			      ", flushed to " LSN_PF,
-			      log_sys.last_checkpoint_lsn,
+			      lsn_t{log_sys.last_checkpoint_lsn},
 			      log_sys.get_flushed_lsn()));
 
 	MONITOR_INC(MONITOR_NUM_CHECKPOINT);
@@ -1011,7 +1011,6 @@ ATTRIBUTE_COLD void logs_empty_and_mark_files_at_shutdown()
 		!srv_read_only_mode && srv_fast_shutdown < 2) {
 		buf_dump_start();
 	}
-	srv_error_monitor_timer.reset();
 	srv_monitor_timer.reset();
 	lock_sys.timeout_timer.reset();
 	if (do_srv_shutdown) {
@@ -1087,7 +1086,7 @@ wait_suspend_loop:
 
 	if (buf_page_cleaner_is_active) {
 		thread_name = "page cleaner thread";
-		mysql_cond_signal(&buf_pool.do_flush_list);
+		pthread_cond_signal(&buf_pool.do_flush_list);
 		goto wait_suspend_loop;
 	}
 
@@ -1235,7 +1234,7 @@ log_print(
 		lsn,
 		log_sys.get_flushed_lsn(),
 		pages_flushed,
-		log_sys.last_checkpoint_lsn);
+		lsn_t{log_sys.last_checkpoint_lsn});
 
 	current_time = time(NULL);
 

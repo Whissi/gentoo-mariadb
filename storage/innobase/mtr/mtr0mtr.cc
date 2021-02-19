@@ -354,8 +354,10 @@ struct ReleaseBlocks
 void mtr_t::start()
 {
   ut_ad(!m_freed_pages);
+  ut_ad(!m_freed_space);
   MEM_UNDEFINED(this, sizeof *this);
-  MEM_MAKE_DEFINED(&m_freed_pages, sizeof(m_freed_pages));
+  MEM_MAKE_DEFINED(&m_freed_space, sizeof m_freed_space);
+  MEM_MAKE_DEFINED(&m_freed_pages, sizeof m_freed_pages);
 
   ut_d(m_start= true);
   ut_d(m_commit= false);
@@ -373,7 +375,7 @@ void mtr_t::start()
   ut_d(m_user_space_id= TRX_SYS_SPACE);
   m_user_space= nullptr;
   m_commit_lsn= 0;
-  m_freed_in_system_tablespace= m_trim_pages= false;
+  m_trim_pages= false;
 }
 
 /** Release the resources */
@@ -418,28 +420,24 @@ void mtr_t::commit()
     if (m_freed_pages)
     {
       ut_ad(!m_freed_pages->empty());
-      fil_space_t *freed_space= m_user_space;
-      /* Get the freed tablespace in case of predefined tablespace */
-      if (!freed_space)
-      {
-        ut_ad(is_freed_system_tablespace_page());
-        freed_space= fil_system.sys_space;
-      }
-
-      ut_ad(memo_contains(*freed_space));
+      ut_ad(m_freed_space);
+      ut_ad(memo_contains(*m_freed_space));
+      ut_ad(is_named_space(m_freed_space));
       /* Update the last freed lsn */
-      freed_space->update_last_freed_lsn(m_commit_lsn);
+      m_freed_space->update_last_freed_lsn(m_commit_lsn);
 
       if (!is_trim_pages())
         for (const auto &range : *m_freed_pages)
-          freed_space->add_free_range(range);
+          m_freed_space->add_free_range(range);
       else
-        freed_space->clear_freed_ranges();
+        m_freed_space->clear_freed_ranges();
       delete m_freed_pages;
       m_freed_pages= nullptr;
-      /* Reset of m_trim_pages and m_freed_in_system_tablespace
-      happens in mtr_t::start() */
+      m_freed_space= nullptr;
+      /* mtr_t::start() will reset m_trim_pages */
     }
+    else
+      ut_ad(!m_freed_space);
 
     m_memo.for_each_block_in_reverse(CIterate<const ReleaseBlocks>
                                      (ReleaseBlocks(lsns.first, m_commit_lsn,
@@ -476,8 +474,8 @@ void mtr_t::commit_files(lsn_t checkpoint_lsn)
 	ut_ad(!m_made_dirty);
 	ut_ad(m_memo.size() == 0);
 	ut_ad(!srv_read_only_mode);
+	ut_ad(!m_freed_space);
 	ut_ad(!m_freed_pages);
-	ut_ad(!m_freed_in_system_tablespace);
 
 	if (checkpoint_lsn) {
 		byte*	ptr = m_log.push<byte*>(SIZE_OF_FILE_CHECKPOINT);
@@ -889,33 +887,53 @@ inline std::pair<lsn_t,bool> mtr_t::finish_write(ulint len)
 	m_log.for_each_block(write_log);
 	m_commit_lsn = log_sys.get_lsn();
 	bool flush = log_close(m_commit_lsn);
+	DBUG_EXECUTE_IF("ib_log_flush_ahead", flush=true;);
 
 	return std::make_pair(start_lsn, flush);
 }
 
-/** Find buffer fix count of the given block acquired by the
-mini-transaction */
-struct FindBlock
+/** Find out whether a block was not X-latched by the mini-transaction */
+struct FindBlockX
 {
-  int32_t num_fix;
-  const buf_block_t *const block;
+  const buf_block_t &block;
 
-  FindBlock(const buf_block_t *block_buf): num_fix(0), block(block_buf) {}
+  FindBlockX(const buf_block_t &block): block(block) {}
 
-  bool operator()(const mtr_memo_slot_t* slot)
+  /** @return whether the block was not found x-latched */
+  bool operator()(const mtr_memo_slot_t *slot) const
   {
-    if (slot->object == block)
-      num_fix++;
-    return true;
+    return slot->object != &block || slot->type != MTR_MEMO_PAGE_X_FIX;
   }
 };
 
-uint32_t mtr_t::get_fix_count(const buf_block_t *block) const
+#ifdef UNIV_DEBUG
+/** Assert that the block is not present in the mini-transaction */
+struct FindNoBlock
 {
-  Iterate<FindBlock> iteration((FindBlock(block)));
-  if (m_memo.for_each_block(iteration))
-    return iteration.functor.num_fix;
-  return 0;
+  const buf_block_t &block;
+
+  FindNoBlock(const buf_block_t &block): block(block) {}
+
+  /** @return whether the block was not found */
+  bool operator()(const mtr_memo_slot_t *slot) const
+  {
+    return slot->object != &block;
+  }
+};
+#endif /* UNIV_DEBUG */
+
+bool mtr_t::have_x_latch(const buf_block_t &block) const
+{
+  if (m_memo.for_each_block(CIterate<FindBlockX>(FindBlockX(block))))
+  {
+    ut_ad(m_memo.for_each_block(CIterate<FindNoBlock>(FindNoBlock(block))));
+    ut_ad(!memo_contains_flagged(&block,
+                                 MTR_MEMO_PAGE_S_FIX | MTR_MEMO_PAGE_SX_FIX |
+                                 MTR_MEMO_BUF_FIX | MTR_MEMO_MODIFY));
+    return false;
+  }
+  ut_ad(rw_lock_own(&block.lock, RW_LOCK_X));
+  return true;
 }
 
 #ifdef UNIV_DEBUG
@@ -931,13 +949,13 @@ bool mtr_t::memo_contains(const rw_lock_t &lock, mtr_memo_type_t type)
 
   switch (type) {
   case MTR_MEMO_X_LOCK:
-    ut_ad(rw_lock_own(const_cast<rw_lock_t*>(&lock), RW_LOCK_X));
+    ut_ad(rw_lock_own(&lock, RW_LOCK_X));
     break;
   case MTR_MEMO_SX_LOCK:
-    ut_ad(rw_lock_own(const_cast<rw_lock_t*>(&lock), RW_LOCK_SX));
+    ut_ad(rw_lock_own(&lock, RW_LOCK_SX));
     break;
   case MTR_MEMO_S_LOCK:
-    ut_ad(rw_lock_own(const_cast<rw_lock_t*>(&lock), RW_LOCK_S));
+    ut_ad(rw_lock_own(&lock, RW_LOCK_S));
     break;
   default:
     break;

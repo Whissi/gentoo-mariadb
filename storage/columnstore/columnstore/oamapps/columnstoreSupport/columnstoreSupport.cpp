@@ -71,10 +71,11 @@ typedef boost::tuple<ChildModuleList::iterator, string > threadInfo_t;
 
 bool LOCAL = false;
 
-void childReportThread(threadInfo_t& st)
+void* childReportThread(threadInfo_t* st)
 {
-    ChildModuleList::iterator& list = boost::get<0>(st);
-    string reportType = boost::get<1>(st);
+    assert(st);
+    ChildModuleList::iterator& list = boost::get<0>(*st);
+    string reportType = boost::get<1>(*st);
 
     string remoteModuleName = (*list).moduleName;
     string remoteModuleIP = (*list).moduleIP;
@@ -144,9 +145,10 @@ void childReportThread(threadInfo_t& st)
     pthread_exit(0);
 }
 
-void reportThread(string reporttype)
+void* reportThread(string* reporttype)
 {
-    string reportType = reporttype;
+    assert(reporttype);
+    string reportType = *reporttype;
 
     Oam oam;
 
@@ -764,7 +766,7 @@ int main(int argc, char* argv[])
             //check for mysql password set
             string pwprompt = " ";
 
-            if (oam.checkLogStatus(logFile, "ERROR 1045") )
+            if (checkLogStatus(logFile, "ERROR 1045") )
             {
                 cout << "NOTE: MariaDB Columnstore root user password is set" << endl;
 
@@ -821,7 +823,7 @@ int main(int argc, char* argv[])
                 string cmd = columnstoreMysql + pwprompt + " -e 'status' > " + logFile + " 2>&1";
                 system(cmd.c_str());
 
-                if (oam.checkLogStatus(logFile, "ERROR 1045") )
+                if (checkLogStatus(logFile, "ERROR 1045") )
                 {
                     cout << "FAILED: Failed login using MariaDB Columnstore root user password '" << mysqlpw << "'" << endl;
                     FAILED = true;

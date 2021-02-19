@@ -1,6 +1,6 @@
 /* Copyright (C) 2004-2008 MySQL AB & MySQL Finland AB & TCX DataKonsult AB
    Copyright (C) 2008-2009 Sun Microsystems, Inc.
-   Copyright (c) 2009, 2020, MariaDB Corporation Ab
+   Copyright (c) 2009, 2021, MariaDB Corporation Ab
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -187,11 +187,10 @@ static MYSQL_SYSVAR_BOOL(page_checksum, maria_page_checksums, 0,
        "with PAGE_CHECKSUM clause in CREATE TABLE)", 0, 0, 1);
 
 /* It is only command line argument */
-static MYSQL_SYSVAR_STR(log_dir_path, maria_data_root,
+static MYSQL_SYSVAR_CONST_STR(log_dir_path, maria_data_root,
        PLUGIN_VAR_NOSYSVAR | PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
        "Path to the directory where to store transactional log",
        NULL, NULL, mysql_real_data_home);
-
 
 static MYSQL_SYSVAR_ULONG(log_file_size, log_file_size,
        PLUGIN_VAR_RQCMDARG,
@@ -268,8 +267,9 @@ static MYSQL_THDVAR_ULONG(repair_threads, PLUGIN_VAR_RQCMDARG,
 
 static MYSQL_THDVAR_ULONGLONG(sort_buffer_size, PLUGIN_VAR_RQCMDARG,
        "The buffer that is allocated when sorting the index when doing a "
-       "REPAIR or when creating indexes with CREATE INDEX or ALTER TABLE.", NULL, NULL,
-       SORT_BUFFER_INIT, MIN_SORT_BUFFER, SIZE_T_MAX, 1);
+       "REPAIR or when creating indexes with CREATE INDEX or ALTER TABLE.",
+       NULL, NULL,
+       SORT_BUFFER_INIT, MIN_SORT_BUFFER, SIZE_T_MAX/2, 1);
 
 static MYSQL_THDVAR_ENUM(stats_method, PLUGIN_VAR_RQCMDARG,
        "Specifies how Aria index statistics collection code should treat "
@@ -2549,9 +2549,6 @@ int ha_maria::info(uint flag)
 {
   MARIA_INFO maria_info;
   char name_buff[FN_REFLEN];
-
-  if (!file)
-    return 0;
 
   (void) maria_status(file, &maria_info, flag);
   if (flag & HA_STATUS_VARIABLE)

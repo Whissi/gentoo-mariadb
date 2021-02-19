@@ -2,7 +2,7 @@
 #define HANDLER_INCLUDED
 /*
    Copyright (c) 2000, 2019, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -866,8 +866,10 @@ struct xid_t {
   void set(long f, const char *g, long gl, const char *b, long bl)
   {
     formatID= f;
-    memcpy(data, g, gtrid_length= gl);
-    memcpy(data+gl, b, bqual_length= bl);
+    if ((gtrid_length= gl))
+      memcpy(data, g, gl);
+    if ((bqual_length= bl))
+      memcpy(data+gl, b, bl);
   }
   void set(ulonglong xid)
   {
@@ -1527,7 +1529,7 @@ struct handlerton
    enum handler_create_iterator_result
      (*create_iterator)(handlerton *hton, enum handler_iterator_type type,
                         struct handler_iterator *fill_this_in);
-   int (*abort_transaction)(handlerton *hton, THD *bf_thd,
+   void (*abort_transaction)(handlerton *hton, THD *bf_thd,
 			    THD *victim_thd, my_bool signal);
    int (*set_checkpoint)(handlerton *hton, const XID* xid);
    int (*get_checkpoint)(handlerton *hton, XID* xid);
@@ -1679,7 +1681,8 @@ struct handlerton
   */
   int (*notify_tabledef_changed)(handlerton *hton, LEX_CSTRING *db,
                                  LEX_CSTRING *table_name, LEX_CUSTRING *frm,
-                                 LEX_CUSTRING *org_tabledef_version);
+                                 LEX_CUSTRING *org_tabledef_version,
+                                 handler *file);
 
    /*
      System Versioning
@@ -3276,9 +3279,6 @@ private:
   */
   Handler_share **ha_share;
 
-  /** Stores next_insert_id for handling duplicate key errors. */
-  ulonglong m_prev_insert_id;
-
 public:
   handler(handlerton *ht_arg, TABLE_SHARE *share_arg)
     :table_share(share_arg), table(0),
@@ -3306,7 +3306,7 @@ public:
     m_psi_numrows(0),
     m_psi_locker(NULL),
     row_logging(0), row_logging_init(0),
-    m_lock_type(F_UNLCK), ha_share(NULL), m_prev_insert_id(0)
+    m_lock_type(F_UNLCK), ha_share(NULL)
   {
     DBUG_PRINT("info",
                ("handler created F_UNLCK %d F_RDLCK %d F_WRLCK %d",
@@ -3329,7 +3329,7 @@ public:
   {
     cached_table_flags= table_flags();
   }
-  /* ha_ methods: pubilc wrappers for private virtual API */
+  /* ha_ methods: public wrappers for private virtual API */
   
   int ha_open(TABLE *table, const char *name, int mode, uint test_if_locked,
               MEM_ROOT *mem_root= 0, List<String> *partitions_to_open=NULL);
@@ -4024,16 +4024,6 @@ public:
     */
     next_insert_id= (prev_insert_id > 0) ? prev_insert_id :
       insert_id_for_cur_row;
-  }
-
-  /** Store and restore next_insert_id over duplicate key errors. */
-  virtual void store_auto_increment()
-  {
-    m_prev_insert_id= next_insert_id;
-  }
-  virtual void restore_auto_increment()
-  {
-    restore_auto_increment(m_prev_insert_id);
   }
 
   virtual void update_create_info(HA_CREATE_INFO *create_info) {}

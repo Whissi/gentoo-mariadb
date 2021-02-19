@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1997, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2016, 2020, MariaDB Corporation.
+Copyright (c) 2016, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -1986,7 +1986,7 @@ ibuf_remove_free_page(void)
 	ibuf_bitmap_page_set_bits<IBUF_BITMAP_IBUF>(
 		bitmap_page, page_id, srv_page_size, false, &mtr);
 
-	buf_page_free(page_id, &mtr, __FILE__, __LINE__);
+	buf_page_free(fil_system.sys_space, page_no, &mtr, __FILE__, __LINE__);
 
 	ibuf_mtr_commit(&mtr);
 }
@@ -4164,25 +4164,40 @@ bool ibuf_page_exists(const page_id_t id, ulint zip_size)
 	return bitmap_bits;
 }
 
+/** Reset the bits in the bitmap page for the given block and page id.
+@param b        X-latched secondary index page (nullptr to discard changes)
+@param page_id  page identifier
+@param zip_size ROW_FORMAT=COMPRESSED page size, or 0
+@param mtr      mini-transaction */
+static void ibuf_reset_bitmap(buf_block_t *b, page_id_t page_id,
+                              ulint zip_size, mtr_t *mtr)
+{
+ buf_block_t *bitmap= ibuf_bitmap_get_map_page(page_id, zip_size, mtr);
+ if (!bitmap)
+   return;
+
+ const ulint physical_size = zip_size ? zip_size : srv_page_size;
+ /* FIXME: update the bitmap byte only once! */
+ ibuf_bitmap_page_set_bits<IBUF_BITMAP_BUFFERED>(bitmap, page_id,
+                                                 physical_size, false, mtr);
+
+ if (b)
+   ibuf_bitmap_page_set_bits<IBUF_BITMAP_FREE>(bitmap, page_id, physical_size,
+                                               ibuf_index_page_calc_free(b),
+                                               mtr);
+}
+
 /** When an index page is read from a disk to the buffer pool, this function
 applies any buffered operations to the page and deletes the entries from the
 insert buffer. If the page is not read, but created in the buffer pool, this
 function deletes its buffered entries from the insert buffer; there can
 exist entries for such a page if the page belonged to an index which
 subsequently was dropped.
-@param[in,out]	block			if page has been read from disk,
-pointer to the page x-latched, else NULL
-@param[in]	page_id			page id of the index page
-@param[in]	zip_size		ROW_FORMAT=COMPRESSED page size, or 0
-@param[in]	update_ibuf_bitmap	normally this is set, but
-if we have deleted or are deleting the tablespace, then we naturally do not
-want to update a non-existent bitmap page */
-void
-ibuf_merge_or_delete_for_page(
-	buf_block_t*		block,
-	const page_id_t		page_id,
-	ulint			zip_size,
-	bool			update_ibuf_bitmap)
+@param block    X-latched page to try to apply changes to, or NULL to discard
+@param page_id  page identifier
+@param zip_size ROW_FORMAT=COMPRESSED page size, or 0 */
+void ibuf_merge_or_delete_for_page(buf_block_t *block, const page_id_t page_id,
+                                   ulint zip_size)
 {
 	btr_pcur_t	pcur;
 #ifdef UNIV_IBUF_DEBUG
@@ -4211,47 +4226,41 @@ ibuf_merge_or_delete_for_page(
 		return;
 	}
 
-	fil_space_t*	space;
+	fil_space_t* space = fil_space_t::get(page_id.space());
 
-	if (update_ibuf_bitmap) {
-		space = fil_space_t::get(page_id.space());
-
-		if (UNIV_UNLIKELY(!space)) {
-			/* Do not try to read the bitmap page from the
-			non-existent tablespace, delete the ibuf records */
-			block = NULL;
-			update_ibuf_bitmap = false;
-		} else {
-			ulint	bitmap_bits = 0;
-
-			ibuf_mtr_start(&mtr);
-
-			buf_block_t* bitmap_page = ibuf_bitmap_get_map_page(
-				page_id, zip_size, &mtr);
-
-			if (bitmap_page
-			    && fil_page_get_type(bitmap_page->frame)
-			    != FIL_PAGE_TYPE_ALLOCATED) {
-				bitmap_bits = ibuf_bitmap_page_get_bits(
-					bitmap_page->frame, page_id, zip_size,
-					IBUF_BITMAP_BUFFERED, &mtr);
-			}
-
-			ibuf_mtr_commit(&mtr);
-
-			if (!bitmap_bits) {
-				/* No changes are buffered for this page. */
-				space->release();
-				return;
-			}
-		}
-	} else if (block != NULL
-		   && (ibuf_fixed_addr_page(page_id, physical_size)
-		       || fsp_descr_page(page_id, physical_size))) {
-
-		return;
+	if (UNIV_UNLIKELY(!space)) {
+		block = NULL;
 	} else {
-		space = NULL;
+		ulint	bitmap_bits = 0;
+
+		ibuf_mtr_start(&mtr);
+
+		buf_block_t* bitmap_page = ibuf_bitmap_get_map_page(
+			page_id, zip_size, &mtr);
+
+		if (bitmap_page
+		    && fil_page_get_type(bitmap_page->frame)
+		    != FIL_PAGE_TYPE_ALLOCATED) {
+			bitmap_bits = ibuf_bitmap_page_get_bits(
+				bitmap_page->frame, page_id, zip_size,
+				IBUF_BITMAP_BUFFERED, &mtr);
+		}
+
+		ibuf_mtr_commit(&mtr);
+
+		if (bitmap_bits && fseg_page_is_free(
+				space, page_id.page_no())) {
+			ibuf_mtr_start(&mtr);
+			ibuf_reset_bitmap(block, page_id, zip_size, &mtr);
+			ibuf_mtr_commit(&mtr);
+			bitmap_bits = 0;
+		}
+
+		if (!bitmap_bits) {
+			/* No changes are buffered for this page. */
+			space->release();
+			return;
+		}
 	}
 
 	mem_heap_t* heap = mem_heap_create(512);
@@ -4297,12 +4306,11 @@ loop:
 		ibuf.index, search_tuple, PAGE_CUR_GE, BTR_MODIFY_LEAF,
 		&pcur, &mtr);
 
-	if (block != NULL) {
+	if (block) {
 		ut_ad(rw_lock_own(&block->lock, RW_LOCK_X));
 		buf_block_buf_fix_inc(block, __FILE__, __LINE__);
 		rw_lock_x_lock(&block->lock);
 
-		mtr.set_named_space(space);
 		mtr.memo_push(block, MTR_MEMO_PAGE_X_FIX);
 		/* This is a user page (secondary index leaf page),
 		but we pretend that it is a change buffer page in
@@ -4311,7 +4319,9 @@ loop:
 		the block is io-fixed. Other threads must not try to
 		latch an io-fixed block. */
 		buf_block_dbg_add_level(block, SYNC_IBUF_TREE_NODE);
-	} else if (update_ibuf_bitmap) {
+	}
+
+	if (space) {
 		mtr.set_named_space(space);
 	}
 
@@ -4467,18 +4477,8 @@ loop:
 	}
 
 reset_bit:
-	if (!update_ibuf_bitmap) {
-	} else if (buf_block_t* bitmap = ibuf_bitmap_get_map_page(
-			   page_id, zip_size, &mtr)) {
-		/* FIXME: update the bitmap byte only once! */
-		ibuf_bitmap_page_set_bits<IBUF_BITMAP_BUFFERED>(
-			bitmap, page_id, physical_size, false, &mtr);
-
-		if (block != NULL) {
-			ibuf_bitmap_page_set_bits<IBUF_BITMAP_FREE>(
-				bitmap, page_id, physical_size,
-				ibuf_index_page_calc_free(block), &mtr);
-		}
+	if (space) {
+		ibuf_reset_bitmap(block, page_id, zip_size, &mtr);
 	}
 
 	ibuf_mtr_commit(&mtr);

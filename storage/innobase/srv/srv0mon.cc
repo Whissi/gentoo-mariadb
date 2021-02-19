@@ -2,7 +2,7 @@
 
 Copyright (c) 2010, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -1342,8 +1342,8 @@ monitor_value_t	innodb_counter_value[NUM_MONITOR];
 
 /* monitor_set_tbl is used to record and determine whether a monitor
 has been turned on/off. */
-ulint		monitor_set_tbl[(NUM_MONITOR + NUM_BITS_ULINT
-						- 1) / NUM_BITS_ULINT];
+Atomic_relaxed<ulint>
+    monitor_set_tbl[(NUM_MONITOR + NUM_BITS_ULINT - 1) / NUM_BITS_ULINT];
 
 /****************************************************************//**
 Get a monitor's "monitor_info" by its monitor id (index into the
@@ -1565,7 +1565,7 @@ srv_mon_process_existing_counter(
 
 	/* innodb_buffer_pool_wait_free */
 	case MONITOR_OVLD_BUF_POOL_WAIT_FREE:
-		value = srv_stats.buf_pool_wait_free;
+		value = buf_pool.stat.LRU_waits;
 		break;
 
 	/* innodb_buffer_pool_read_ahead */
@@ -1720,12 +1720,16 @@ srv_mon_process_existing_counter(
 
 	/* innodb_dblwr_writes */
 	case MONITOR_OVLD_SRV_DBLWR_WRITES:
-		value = srv_stats.dblwr_writes;
+		buf_dblwr.lock();
+		value = buf_dblwr.batches();
+		buf_dblwr.unlock();
 		break;
 
 	/* innodb_dblwr_pages_written */
 	case MONITOR_OVLD_SRV_DBLWR_PAGES_WRITTEN:
-		value = srv_stats.dblwr_pages_written;
+		buf_dblwr.lock();
+		value = buf_dblwr.written();
+		buf_dblwr.unlock();
 		break;
 
 	/* innodb_page_size */

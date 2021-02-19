@@ -39,6 +39,10 @@ using namespace rowgroup;
 using namespace logging;
 
 #include "collation.h"
+#include "mariadb_my_sys.h"
+#include <myisampack.h> // min_intXstore()
+
+#include "vlarray.h"
 
 namespace
 {
@@ -89,7 +93,7 @@ string Func_char::getStrVal(Row& row,
                             CalpontSystemCatalog::ColType& ct)
 {
     const int BUF_SIZE = 4 * parm.size();
-    char buf[BUF_SIZE];
+    utils::VLArray<char, 1024> buf(BUF_SIZE);
     buf[0]= 0;
     char* pBuf = buf;
     CHARSET_INFO* cs = ct.getCharset();

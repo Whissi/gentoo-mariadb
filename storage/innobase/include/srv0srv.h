@@ -3,7 +3,7 @@
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, 2009, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -81,24 +81,12 @@ struct srv_stats_t
 	space in the log buffer and have to flush it */
 	ulint_ctr_1_t		log_waits;
 
-	/** Count the number of times the doublewrite buffer was flushed */
-	ulint_ctr_1_t		dblwr_writes;
-
-	/** Store the number of pages that have been flushed to the
-	doublewrite buffer */
-	ulint_ctr_1_t		dblwr_pages_written;
-
 #if defined(LINUX_NATIVE_AIO)
 	ulint_ctr_1_t buffered_aio_submitted;
 #endif
 
 	/** Store the number of write requests issued */
 	ulint_ctr_1_t		buf_pool_write_requests;
-
-	/** Store the number of times when we had to wait for a free page
-	in the buffer pool. It happens when the buffer pool is full and we
-	need to make a flush, in order to be able to read or create a page. */
-	ulint_ctr_1_t		buf_pool_wait_free;
 
 	/** Number of buffer pool reads that led to the reading of
 	a disk page */
@@ -344,11 +332,11 @@ extern ulong srv_buf_pool_load_pages_abort;
 /** Lock table size in bytes */
 extern ulint	srv_lock_table_size;
 
-extern ulint	srv_n_file_io_threads;
+extern uint	srv_n_file_io_threads;
 extern my_bool	srv_random_read_ahead;
 extern ulong	srv_read_ahead_threshold;
-extern ulong	srv_n_read_io_threads;
-extern ulong	srv_n_write_io_threads;
+extern uint	srv_n_read_io_threads;
+extern uint	srv_n_write_io_threads;
 
 /* Defragmentation, Origianlly facebook default value is 100, but it's too high */
 #define SRV_DEFRAGMENT_FREQUENCY_DEFAULT 40
@@ -359,8 +347,6 @@ extern uint	srv_defragment_fill_factor_n_recs;
 extern double	srv_defragment_fill_factor;
 extern uint	srv_defragment_frequency;
 extern ulonglong	srv_defragment_interval;
-
-extern ulong	srv_idle_flush_pct;
 
 extern uint	srv_change_buffer_max_size;
 
@@ -380,7 +366,7 @@ extern ulong	srv_innodb_stats_method;
 
 extern ulint	srv_max_n_open_files;
 
-extern double	srv_max_dirty_pages_pct;
+extern double	srv_max_buf_pool_modified_pct;
 extern double	srv_max_dirty_pages_pct_lwm;
 
 extern double	srv_adaptive_flushing_lwm;
@@ -407,10 +393,8 @@ extern my_bool			srv_stats_sample_traditional;
 extern my_bool	srv_use_doublewrite_buf;
 extern ulong	srv_checksum_algorithm;
 
-extern double	srv_max_buf_pool_modified_pct;
 extern my_bool	srv_force_primary_key;
 
-extern double	srv_max_buf_pool_modified_pct;
 extern ulong	srv_max_purge_lag;
 extern ulong	srv_max_purge_lag_delay;
 
@@ -472,11 +456,6 @@ extern bool	srv_log_file_created;
 extern ulint	srv_dml_needed_delay;
 
 #define SRV_MAX_N_IO_THREADS	130
-
-/* Array of English strings describing the current state of an
-i/o handler thread */
-extern const char* srv_io_thread_op_info[];
-extern const char* srv_io_thread_function[];
 
 /** innodb_purge_threads; the number of purge tasks to use */
 extern uint srv_n_purge_threads;
@@ -612,19 +591,6 @@ srv_boot(void);
 Frees the data structures created in srv_init(). */
 void
 srv_free(void);
-/*==========*/
-/*********************************************************************//**
-Sets the info describing an i/o thread current state. */
-void
-srv_set_io_thread_op_info(
-/*======================*/
-	ulint		i,	/*!< in: the 'segment' of the i/o thread */
-	const char*	str);	/*!< in: constant char string describing the
-				state */
-/*********************************************************************//**
-Resets the info describing an i/o thread current state. */
-void
-srv_reset_io_thread_op_info();
 
 /** Wake up the purge if there is work to do. */
 void
@@ -702,13 +668,6 @@ Complete the shutdown tasks such as background DROP TABLE,
 and optionally change buffer merge (on innodb_fast_shutdown=0). */
 void srv_shutdown(bool ibuf_merge);
 
-
-/*************************************************************************
-A task which prints warnings about semaphore waits which have lasted
-too long. These can be used to track bugs which cause hangs.
-*/
-void srv_error_monitor_task(void*);
-
 } /* extern "C" */
 
 #ifdef UNIV_DEBUG
@@ -752,8 +711,7 @@ struct export_var_t{
 	ulint innodb_buffer_pool_pages_old;
 	ulint innodb_buffer_pool_read_requests;	/*!< buf_pool.stat.n_page_gets */
 	ulint innodb_buffer_pool_reads;		/*!< srv_buf_pool_reads */
-	ulint innodb_buffer_pool_wait_free;	/*!< srv_buf_pool_wait_free */
-	ulint innodb_buffer_pool_write_requests;/*!< srv_buf_pool_write_requests */
+	ulint innodb_buffer_pool_write_requests;/*!< srv_stats.buf_pool_write_requests */
 	ulint innodb_buffer_pool_read_ahead_rnd;/*!< srv_read_ahead_rnd */
 	ulint innodb_buffer_pool_read_ahead;	/*!< srv_read_ahead */
 	ulint innodb_buffer_pool_read_ahead_evicted;/*!< srv_read_ahead evicted*/
@@ -900,12 +858,14 @@ struct srv_slot_t{
 
 extern tpool::thread_pool *srv_thread_pool;
 extern std::unique_ptr<tpool::timer> srv_master_timer;
-extern std::unique_ptr<tpool::timer> srv_error_monitor_timer;
 extern std::unique_ptr<tpool::timer> srv_monitor_timer;
+
+/** The interval at which srv_monitor_task is invoked, in milliseconds */
+constexpr unsigned SRV_MONITOR_INTERVAL= 15000; /* 4 times per minute */
 
 static inline void srv_monitor_timer_schedule_now()
 {
-  srv_monitor_timer->set_time(0, 5000);
+  srv_monitor_timer->set_time(0, SRV_MONITOR_INTERVAL);
 }
 static inline void srv_start_periodic_timer(std::unique_ptr<tpool::timer>& t,
                                             void (*func)(void*), int period)

@@ -1,6 +1,6 @@
 /*****************************************************************************
 Copyright (C) 2013, 2015, Google Inc. All Rights Reserved.
-Copyright (c) 2014, 2020, MariaDB Corporation.
+Copyright (c) 2014, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -991,10 +991,13 @@ fil_crypt_read_crypt_data(fil_space_t* space)
 	const ulint zip_size = space->zip_size();
 	mtr_t	mtr;
 	mtr.start();
-	if (buf_block_t* block = buf_page_get(page_id_t(space->id, 0),
-					      zip_size, RW_S_LATCH, &mtr)) {
+	if (buf_block_t* block = buf_page_get_gen(page_id_t(space->id, 0),
+						  zip_size, RW_S_LATCH,
+						  nullptr,
+						  BUF_GET_POSSIBLY_FREED,
+						  __FILE__, __LINE__, &mtr)) {
 		mutex_enter(&fil_system.mutex);
-		if (!space->crypt_data) {
+		if (!space->crypt_data && !space->is_stopping()) {
 			space->crypt_data = fil_space_read_crypt_data(
 				zip_size, block->frame);
 		}
@@ -1402,13 +1405,10 @@ fil_crypt_realloc_iops(
 	fil_crypt_update_total_stat(state);
 }
 
-/***********************************************************************
-Return allocated iops to global
-@param[in,out]		state		Rotation state */
-static
-void
-fil_crypt_return_iops(
-	rotate_thread_t *state)
+/** Release excess allocated iops
+@param state   rotation state
+@param wake    whether to wake up other threads */
+static void fil_crypt_return_iops(rotate_thread_t *state, bool wake= true)
 {
 	if (state->allocated_iops > 0) {
 		uint iops = state->allocated_iops;
@@ -1424,11 +1424,26 @@ fil_crypt_return_iops(
 
 		n_fil_crypt_iops_allocated -= iops;
 		state->allocated_iops = 0;
-		os_event_set(fil_crypt_threads_event);
+		if (wake) {
+			os_event_set(fil_crypt_threads_event);
+		}
 		mutex_exit(&fil_crypt_threads_mutex);
 	}
 
 	fil_crypt_update_total_stat(state);
+}
+
+/** Acquire a tablespace reference.
+@return whether a tablespace reference was successfully acquired */
+inline bool fil_space_t::acquire_if_not_stopped()
+{
+  ut_ad(mutex_own(&fil_system.mutex));
+  const uint32_t n= acquire_low();
+  if (UNIV_LIKELY(!(n & (STOPPING | CLOSING))))
+    return true;
+  if (UNIV_UNLIKELY(n & STOPPING))
+    return false;
+  return UNIV_LIKELY(!(n & CLOSING)) || prepare(true);
 }
 
 /** Return the next tablespace from rotation_list.
@@ -1437,7 +1452,8 @@ fil_crypt_return_iops(
 the encryption parameters were changed
 @param encrypt expected state of innodb_encrypt_tables
 @return the next tablespace to process (n_pending_ops incremented)
-@retval NULL if this was the last */
+@retval fil_system.temp_space if there is no work to do
+@retval nullptr upon reaching the end of the iteration */
 inline fil_space_t *fil_system_t::keyrotate_next(fil_space_t *space,
                                                  bool recheck, bool encrypt)
 {
@@ -1472,15 +1488,20 @@ inline fil_space_t *fil_system_t::keyrotate_next(fil_space_t *space,
     }
   }
 
-  while (it != end)
+  if (it == end)
+    return temp_space;
+
+  do
   {
     space= &*it;
-    if (space->acquire_if_not_stopped(true))
+    if (space->acquire_if_not_stopped())
       return space;
-    while (++it != end && (!UT_LIST_GET_LEN(it->chain) || it->is_stopping()));
+    if (++it == end)
+      return nullptr;
   }
+  while (!UT_LIST_GET_LEN(it->chain) || it->is_stopping());
 
-  return NULL;
+  return nullptr;
 }
 
 /** Determine the next tablespace for encryption key rotation.
@@ -1489,6 +1510,7 @@ inline fil_space_t *fil_system_t::keyrotate_next(fil_space_t *space,
 encryption parameters were changed
 @param encrypt  expected state of innodb_encrypt_tables
 @return the next tablespace
+@retval fil_system.temp_space if there is no work to do
 @retval nullptr upon reaching the end of the iteration */
 inline fil_space_t *fil_space_t::next(fil_space_t *space, bool recheck,
                                       bool encrypt)
@@ -1561,10 +1583,24 @@ static bool fil_crypt_find_space_to_rotate(
 		state->space = NULL;
 	}
 
-	state->space = fil_space_t::next(state->space, *recheck,
-					 key_state->key_version != 0);
+	bool wake;
+	for (;;) {
+		state->space = fil_space_t::next(state->space, *recheck,
+						 key_state->key_version != 0);
+		wake = state->should_shutdown();
 
-	while (!state->should_shutdown() && state->space) {
+		if (state->space == fil_system.temp_space) {
+			goto done;
+		} else if (wake) {
+			break;
+		} else {
+			wake = true;
+		}
+
+		if (!state->space) {
+			break;
+		}
+
 		/* If there is no crypt data and we have not yet read
 		page 0 for this tablespace, we need to read it before
 		we can continue. */
@@ -1579,18 +1615,16 @@ static bool fil_crypt_find_space_to_rotate(
 			state->min_key_version_found = key_state->key_version;
 			return true;
 		}
-
-		state->space = fil_space_t::next(state->space, *recheck,
-					         key_state->key_version != 0);
 	}
 
 	if (state->space) {
 		state->space->release();
+done:
 		state->space = NULL;
 	}
 
 	/* no work to do; release our allocation of I/O capacity */
-	fil_crypt_return_iops(state);
+	fil_crypt_return_iops(state, wake);
 
 	return false;
 
@@ -1740,6 +1774,11 @@ fil_crypt_get_page_throttle_func(
 		return NULL;
 	}
 
+	if (fseg_page_is_free(space, state->offset)) {
+		/* page is already freed */
+		return NULL;
+	}
+
 	state->crypt_stat.pages_read_from_disk++;
 
 	const ulonglong start = my_interval_timer();
@@ -1843,6 +1882,9 @@ fil_crypt_rotate_page(
 			some dummy pages will be allocated, with 0 in
 			the FIL_PAGE_TYPE. Those pages should be
 			skipped from key rotation forever. */
+		} else if (block->page.status == buf_page_t::FREED) {
+			/* Do not modify freed pages to avoid an assertion
+			failure on recovery.*/
 		} else if (fil_crypt_needs_rotation(
 				crypt_data,
 				kv,
@@ -1989,12 +2031,10 @@ fil_crypt_flush_space(
 	mtr_t mtr;
 	mtr.start();
 
-	dberr_t err;
-
 	if (buf_block_t* block = buf_page_get_gen(
 		    page_id_t(space->id, 0), space->zip_size(),
 		    RW_X_LATCH, NULL, BUF_GET_POSSIBLY_FREED,
-		    __FILE__, __LINE__, &mtr, &err)) {
+		    __FILE__, __LINE__, &mtr)) {
 		mtr.set_named_space(space);
 		crypt_data->write_page0(block, &mtr);
 	}
@@ -2187,6 +2227,8 @@ fil_crypt_set_thread_cnt(
 	const uint	new_cnt)
 {
 	if (!fil_crypt_threads_inited) {
+		if (srv_shutdown_state != SRV_SHUTDOWN_NONE)
+			return;
 		fil_crypt_threads_init();
 	}
 
@@ -2198,8 +2240,7 @@ fil_crypt_set_thread_cnt(
 		for (uint i = 0; i < add; i++) {
 			ib::info() << "Creating #"
 				   << i+1 << " encryption thread id "
-				   << os_thread_pf(
-					   os_thread_create(fil_crypt_thread))
+				   << os_thread_create(fil_crypt_thread)
 				   << " total threads " << new_cnt << ".";
 		}
 	} else if (new_cnt < srv_n_fil_crypt_threads) {
@@ -2233,7 +2274,7 @@ static void fil_crypt_rotation_list_fill()
 		if (space->purpose != FIL_TYPE_TABLESPACE
 		    || space->is_in_rotation_list
 		    || UT_LIST_GET_LEN(space->chain) == 0
-		    || !space->acquire_if_not_stopped(true)) {
+		    || !space->acquire_if_not_stopped()) {
 			continue;
 		}
 

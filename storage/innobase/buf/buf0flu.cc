@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 Copyright (c) 2013, 2014, Fusion-io
 
 This program is free software; you can redistribute it and/or modify it under
@@ -126,6 +126,22 @@ static void buf_flush_validate_skip()
 }
 #endif /* UNIV_DEBUG */
 
+/** Wake up the page cleaner if needed */
+inline void buf_pool_t::page_cleaner_wakeup()
+{
+  if (!page_cleaner_idle())
+    return;
+  double dirty_pct= double(UT_LIST_GET_LEN(buf_pool.flush_list)) * 100.0 /
+    double(UT_LIST_GET_LEN(buf_pool.LRU) + UT_LIST_GET_LEN(buf_pool.free));
+  double pct_lwm= srv_max_dirty_pages_pct_lwm;
+  if ((pct_lwm != 0.0 && pct_lwm <= dirty_pct) ||
+      srv_max_buf_pool_modified_pct <= dirty_pct)
+  {
+    page_cleaner_is_idle= false;
+    pthread_cond_signal(&do_flush_list);
+  }
+}
+
 /** Insert a modified block into the flush list.
 @param[in,out]	block	modified block
 @param[in]	lsn	oldest modification */
@@ -134,6 +150,7 @@ void buf_flush_insert_into_flush_list(buf_block_t* block, lsn_t lsn)
 	mysql_mutex_assert_not_owner(&buf_pool.mutex);
 	mysql_mutex_assert_owner(&log_sys.flush_order_mutex);
 	ut_ad(lsn);
+	ut_ad(!fsp_is_system_temporary(block->page.id().space()));
 
 	mysql_mutex_lock(&buf_pool.flush_list_mutex);
 	block->page.set_oldest_modification(lsn);
@@ -145,27 +162,31 @@ void buf_flush_insert_into_flush_list(buf_block_t* block, lsn_t lsn)
 
 	UT_LIST_ADD_FIRST(buf_pool.flush_list, &block->page);
 	ut_d(buf_flush_validate_skip());
+	buf_pool.page_cleaner_wakeup();
 	mysql_mutex_unlock(&buf_pool.flush_list_mutex);
+}
+
+/** Remove a block from buf_pool.flush_list */
+static void buf_flush_remove_low(buf_page_t *bpage)
+{
+  ut_ad(!fsp_is_system_temporary(bpage->id().space()));
+  mysql_mutex_assert_owner(&buf_pool.mutex);
+  mysql_mutex_assert_owner(&buf_pool.flush_list_mutex);
+  ut_ad(!bpage->oldest_modification());
+  buf_pool.flush_hp.adjust(bpage);
+  UT_LIST_REMOVE(buf_pool.flush_list, bpage);
+  buf_pool.stat.flush_list_bytes -= bpage->physical_size();
+#ifdef UNIV_DEBUG
+  buf_flush_validate_skip();
+#endif /* UNIV_DEBUG */
 }
 
 /** Remove a block from the flush list of modified blocks.
 @param[in,out]	bpage	block to be removed from the flush list */
 static void buf_flush_remove(buf_page_t *bpage)
 {
-	mysql_mutex_assert_owner(&buf_pool.mutex);
-	mysql_mutex_assert_owner(&buf_pool.flush_list_mutex);
-
-	/* Important that we adjust the hazard pointer before removing
-	the bpage from flush list. */
-	buf_pool.flush_hp.adjust(bpage);
-	UT_LIST_REMOVE(buf_pool.flush_list, bpage);
-	bpage->clear_oldest_modification();
-
-	buf_pool.stat.flush_list_bytes -= bpage->physical_size();
-
-#ifdef UNIV_DEBUG
-	buf_flush_validate_skip();
-#endif /* UNIV_DEBUG */
+  bpage->clear_oldest_modification();
+  buf_flush_remove_low(bpage);
 }
 
 /** Remove all dirty pages belonging to a given tablespace when we are
@@ -265,6 +286,7 @@ buf_flush_relocate_on_flush_list(
 	buf_page_t*	prev;
 
 	mysql_mutex_assert_owner(&buf_pool.mutex);
+	ut_ad(!fsp_is_system_temporary(bpage->id().space()));
 
 	if (!bpage->oldest_modification()) {
 		return;
@@ -341,11 +363,19 @@ void buf_page_write_complete(const IORequest &request)
   DBUG_PRINT("ib_buf", ("write page %u:%u",
                         bpage->id().space(), bpage->id().page_no()));
   ut_ad(request.is_LRU() ? buf_pool.n_flush_LRU : buf_pool.n_flush_list);
+  const bool temp= fsp_is_system_temporary(bpage->id().space());
 
   mysql_mutex_lock(&buf_pool.mutex);
   bpage->set_io_fix(BUF_IO_NONE);
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
-  buf_flush_remove(bpage);
+  ut_ad(!temp || bpage->oldest_modification() == 1);
+  bpage->clear_oldest_modification();
+
+  if (!temp)
+    buf_flush_remove_low(bpage);
+  else
+    ut_ad(request.is_LRU());
+
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
   if (dblwr)
@@ -366,12 +396,12 @@ void buf_page_write_complete(const IORequest &request)
   {
     buf_LRU_free_page(bpage, true);
     if (!--buf_pool.n_flush_LRU)
-      mysql_cond_broadcast(&buf_pool.done_flush_LRU);
+      pthread_cond_broadcast(&buf_pool.done_flush_LRU);
   }
   else
   {
     if (!--buf_pool.n_flush_list)
-      mysql_cond_broadcast(&buf_pool.done_flush_list);
+      pthread_cond_broadcast(&buf_pool.done_flush_list);
   }
 
   mysql_mutex_unlock(&buf_pool.mutex);
@@ -772,8 +802,13 @@ static void buf_release_freed_page(buf_page_t *bpage)
   mysql_mutex_lock(&buf_pool.mutex);
   bpage->set_io_fix(BUF_IO_NONE);
   bpage->status= buf_page_t::NORMAL;
+  const bool temp= fsp_is_system_temporary(bpage->id().space());
+  ut_ad(!temp || uncompressed);
+  ut_ad(!temp || bpage->oldest_modification() == 1);
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
-  buf_flush_remove(bpage);
+  bpage->clear_oldest_modification();
+  if (!temp)
+    buf_flush_remove_low(bpage);
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
   if (uncompressed)
@@ -868,14 +903,20 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
   {
     space->reacquire();
     ut_ad(status == buf_page_t::NORMAL || status == buf_page_t::INIT_ON_FLUSH);
-    size_t size, orig_size;
+    size_t size;
+#if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
+    size_t orig_size;
+#endif
     IORequest::Type type= lru ? IORequest::WRITE_LRU : IORequest::WRITE_ASYNC;
 
     if (UNIV_UNLIKELY(!rw_lock)) /* ROW_FORMAT=COMPRESSED */
     {
       ut_ad(!space->full_crc32());
       ut_ad(!space->is_compressed()); /* not page_compressed */
-      orig_size= size= bpage->zip_size();
+      size= bpage->zip_size();
+#if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
+      orig_size= size;
+#endif
       buf_flush_update_zip_checksum(frame, size);
       frame= buf_page_encrypt(space, bpage, frame, &size);
       ut_ad(size == bpage->zip_size());
@@ -883,7 +924,10 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
     else
     {
       byte *page= block->frame;
-      orig_size= size= block->physical_size();
+      size= block->physical_size();
+#if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
+      orig_size= size;
+#endif
 
       if (space->full_crc32())
       {
@@ -903,10 +947,6 @@ static bool buf_flush_page(buf_page_t *bpage, bool lru, fil_space_t *space)
 #if defined HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE || defined _WIN32
       if (size != orig_size && space->punch_hole)
         type= lru ? IORequest::PUNCH_LRU : IORequest::PUNCH;
-#else
-      DBUG_EXECUTE_IF("ignore_punch_hole",
-                      if (size != orig_size && space->punch_hole)
-                        type= lru ? IORequest::PUNCH_LRU : IORequest::PUNCH;);
 #endif
       frame=page;
     }
@@ -1472,11 +1512,11 @@ void buf_flush_wait_batch_end(bool lru)
     tpool::tpool_wait_begin();
     thd_wait_begin(nullptr, THD_WAIT_DISKIO);
     do
-      mysql_cond_wait(cond, &buf_pool.mutex);
+      my_cond_wait(cond, &buf_pool.mutex.m_mutex);
     while (n_flush);
     tpool::tpool_wait_end();
     thd_wait_end(nullptr);
-    mysql_cond_broadcast(cond);
+    pthread_cond_broadcast(cond);
   }
 }
 
@@ -1528,10 +1568,10 @@ ulint buf_flush_lists(ulint max_n, lsn_t lsn)
   const bool running= n_flush != 0;
   /* FIXME: we are performing a dirty read of buf_pool.flush_list.count
   while not holding buf_pool.flush_list_mutex */
-  if (running || !UT_LIST_GET_LEN(buf_pool.flush_list))
+  if (running || (lsn && !UT_LIST_GET_LEN(buf_pool.flush_list)))
   {
     if (!running)
-      mysql_cond_broadcast(cond);
+      pthread_cond_broadcast(cond);
     mysql_mutex_unlock(&buf_pool.mutex);
     return 0;
   }
@@ -1548,7 +1588,7 @@ ulint buf_flush_lists(ulint max_n, lsn_t lsn)
   mysql_mutex_unlock(&buf_pool.mutex);
 
   if (!n_flushing)
-    mysql_cond_broadcast(cond);
+    pthread_cond_broadcast(cond);
 
   buf_dblwr.flush_buffered_writes();
 
@@ -1681,52 +1721,56 @@ ATTRIBUTE_COLD void buf_flush_wait_flushed(lsn_t sync_lsn)
 
   mysql_mutex_lock(&buf_pool.flush_list_mutex);
 
+  if (buf_pool.get_oldest_modification(sync_lsn) < sync_lsn)
+  {
 #if 1 /* FIXME: remove this, and guarantee that the page cleaner serves us */
-  if (UNIV_UNLIKELY(!buf_page_cleaner_is_active)
-      ut_d(|| innodb_page_cleaner_disabled_debug))
-  {
-    for (;;)
+    if (UNIV_UNLIKELY(!buf_page_cleaner_is_active)
+        ut_d(|| innodb_page_cleaner_disabled_debug))
     {
-      const lsn_t lsn= buf_pool.get_oldest_modification(sync_lsn);
-      mysql_mutex_unlock(&buf_pool.flush_list_mutex);
-      if (lsn >= sync_lsn)
-        return;
-      ulint n_pages= buf_flush_lists(srv_max_io_capacity, sync_lsn);
-      buf_flush_wait_batch_end_acquiring_mutex(false);
-      if (n_pages)
+      do
       {
-        MONITOR_INC_VALUE_CUMULATIVE(MONITOR_FLUSH_SYNC_TOTAL_PAGE,
-                                     MONITOR_FLUSH_SYNC_COUNT,
-                                     MONITOR_FLUSH_SYNC_PAGES, n_pages);
-        log_checkpoint();
+        mysql_mutex_unlock(&buf_pool.flush_list_mutex);
+        ulint n_pages= buf_flush_lists(srv_max_io_capacity, sync_lsn);
+        buf_flush_wait_batch_end_acquiring_mutex(false);
+        if (n_pages)
+        {
+          MONITOR_INC_VALUE_CUMULATIVE(MONITOR_FLUSH_SYNC_TOTAL_PAGE,
+                                       MONITOR_FLUSH_SYNC_COUNT,
+                                       MONITOR_FLUSH_SYNC_PAGES, n_pages);
+        }
+        MONITOR_INC(MONITOR_FLUSH_SYNC_WAITS);
+        mysql_mutex_lock(&buf_pool.flush_list_mutex);
       }
-      MONITOR_INC(MONITOR_FLUSH_SYNC_WAITS);
-      mysql_mutex_lock(&buf_pool.flush_list_mutex);
+      while (buf_pool.get_oldest_modification(sync_lsn) < sync_lsn);
+
+      goto try_checkpoint;
     }
-    return;
-  }
-  else if (UNIV_LIKELY(srv_flush_sync))
 #endif
-  {
     if (buf_flush_sync_lsn < sync_lsn)
     {
       buf_flush_sync_lsn= sync_lsn;
-      mysql_cond_signal(&buf_pool.do_flush_list);
+      pthread_cond_signal(&buf_pool.do_flush_list);
     }
+
+    do
+    {
+      tpool::tpool_wait_begin();
+      thd_wait_begin(nullptr, THD_WAIT_DISKIO);
+      my_cond_wait(&buf_pool.done_flush_list,
+                   &buf_pool.flush_list_mutex.m_mutex);
+      thd_wait_end(nullptr);
+      tpool::tpool_wait_end();
+
+      MONITOR_INC(MONITOR_FLUSH_SYNC_WAITS);
+    }
+    while (buf_pool.get_oldest_modification(sync_lsn) < sync_lsn);
   }
 
-  while (buf_pool.get_oldest_modification(sync_lsn) < sync_lsn)
-  {
-    tpool::tpool_wait_begin();
-    thd_wait_begin(nullptr, THD_WAIT_DISKIO);
-    mysql_cond_wait(&buf_pool.done_flush_list, &buf_pool.flush_list_mutex);
-    thd_wait_end(nullptr);
-    tpool::tpool_wait_end();
-
-    MONITOR_INC(MONITOR_FLUSH_SYNC_WAITS);
-  }
-
+try_checkpoint:
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);
+
+  if (UNIV_UNLIKELY(log_sys.last_checkpoint_lsn < sync_lsn))
+    log_checkpoint();
 }
 
 /** If innodb_flush_sync=ON, initiate a furious flush.
@@ -1739,14 +1783,13 @@ void buf_flush_ahead(lsn_t lsn)
   if (recv_recovery_is_on())
     recv_sys.apply(true);
 
-  if (buf_flush_sync_lsn < lsn &&
-      UNIV_LIKELY(srv_flush_sync) && UNIV_LIKELY(buf_page_cleaner_is_active))
+  if (buf_flush_sync_lsn < lsn)
   {
     mysql_mutex_lock(&buf_pool.flush_list_mutex);
     if (buf_flush_sync_lsn < lsn)
     {
       buf_flush_sync_lsn= lsn;
-      mysql_cond_signal(&buf_pool.do_flush_list);
+      pthread_cond_signal(&buf_pool.do_flush_list);
     }
     mysql_mutex_unlock(&buf_pool.flush_list_mutex);
   }
@@ -1824,40 +1867,13 @@ ATTRIBUTE_COLD static void buf_flush_sync_for_checkpoint(lsn_t lsn)
       buf_flush_sync_lsn= 0;
 
     /* wake up buf_flush_wait_flushed() */
-    mysql_cond_broadcast(&buf_pool.done_flush_list);
+    pthread_cond_broadcast(&buf_pool.done_flush_list);
 
     lsn= std::max(lsn, target);
 
     if (measure >= lsn)
       return;
   }
-}
-
-/*********************************************************************//**
-Calculates if flushing is required based on number of dirty pages in
-the buffer pool.
-@param dirty_pct      100*flush_list.count / (LRU.count + free.count)
-@return percent of io_capacity to flush to manage dirty page ratio */
-static ulint af_get_pct_for_dirty(double dirty_pct)
-{
-	ut_ad(srv_max_dirty_pages_pct_lwm <= srv_max_buf_pool_modified_pct);
-
-	if (srv_max_dirty_pages_pct_lwm == 0) {
-		/* The user has not set the option to preflush dirty
-		pages as we approach the high water mark. */
-		if (dirty_pct >= srv_max_buf_pool_modified_pct) {
-			/* We have crossed the high water mark of dirty
-			pages In this case we start flushing at 100% of
-			innodb_io_capacity. */
-			return(100);
-		}
-	} else {
-		/* We should start flushing pages gradually. */
-		return(static_cast<ulint>((dirty_pct * 100)
-		       / (srv_max_buf_pool_modified_pct + 1)));
-	}
-
-	return(0);
 }
 
 /*********************************************************************//**
@@ -1894,9 +1910,11 @@ Based on various factors it decides if there is a need to do flushing.
 @return number of pages recommended to be flushed
 @param last_pages_in  number of pages flushed in previous batch
 @param oldest_lsn     buf_pool.get_oldest_modification(0)
+@param dirty_blocks   UT_LIST_GET_LEN(buf_pool.flush_list)
 @param dirty_pct      100*flush_list.count / (LRU.count + free.count) */
 static ulint page_cleaner_flush_pages_recommendation(ulint last_pages_in,
                                                      lsn_t oldest_lsn,
+                                                     ulint dirty_blocks,
                                                      double dirty_pct)
 {
 	static	lsn_t		prev_lsn = 0;
@@ -1908,16 +1926,24 @@ static ulint page_cleaner_flush_pages_recommendation(ulint last_pages_in,
 	ulint			n_pages = 0;
 
 	const lsn_t cur_lsn = log_sys.get_lsn();
-	ulint pct_for_dirty = af_get_pct_for_dirty(dirty_pct);
 	ut_ad(oldest_lsn <= cur_lsn);
 	ulint pct_for_lsn = af_get_pct_for_lsn(cur_lsn - oldest_lsn);
 	time_t curr_time = time(nullptr);
+	const double max_pct = srv_max_buf_pool_modified_pct;
 
 	if (!prev_lsn || !pct_for_lsn) {
 		prev_time = curr_time;
 		prev_lsn = cur_lsn;
-		return ulint(double(pct_for_dirty) / 100.0
-			     * double(srv_io_capacity));
+		if (max_pct > 0.0) {
+			dirty_pct /= max_pct;
+		}
+
+		n_pages = ulint(dirty_pct * double(srv_io_capacity));
+		if (n_pages < dirty_blocks) {
+			n_pages= std::min<ulint>(srv_io_capacity, dirty_blocks);
+		}
+
+		return n_pages;
 	}
 
 	sum_pages += last_pages_in;
@@ -1966,14 +1992,18 @@ static ulint page_cleaner_flush_pages_recommendation(ulint last_pages_in,
 		sum_pages = 0;
 	}
 
-	mysql_mutex_lock(&buf_pool.flush_list_mutex);
-
+	const ulint pct_for_dirty = srv_max_dirty_pages_pct_lwm == 0
+		? (dirty_pct >= max_pct ? 100 : 0)
+		: static_cast<ulint>
+		(max_pct > 0.0 ? dirty_pct / max_pct : dirty_pct);
 	ulint pct_total = std::max(pct_for_dirty, pct_for_lsn);
 
 	/* Estimate pages to be flushed for the lsn progress */
 	lsn_t	target_lsn = oldest_lsn
 		+ lsn_avg_rate * buf_flush_lsn_scan_factor;
 	ulint	pages_for_lsn = 0;
+
+	mysql_mutex_lock(&buf_pool.flush_list_mutex);
 
 	for (buf_page_t* b = UT_LIST_GET_LAST(buf_pool.flush_list);
 	     b != NULL;
@@ -2026,7 +2056,7 @@ static os_thread_ret_t DECLARE_THREAD(buf_flush_page_cleaner)(void*)
 
 #ifdef UNIV_DEBUG_THREAD_CREATION
   ib::info() << "page_cleaner thread running, id "
-             << os_thread_pf(os_thread_get_curr_id());
+             << os_thread_get_curr_id();
 #endif /* UNIV_DEBUG_THREAD_CREATION */
 #ifdef UNIV_LINUX
   /* linux might be able to set different setting for each thread.
@@ -2054,31 +2084,50 @@ static os_thread_ret_t DECLARE_THREAD(buf_flush_page_cleaner)(void*)
     if (UNIV_UNLIKELY(lsn_limit != 0))
     {
 furious_flush:
-      buf_flush_sync_for_checkpoint(lsn_limit);
-      last_pages= 0;
-      set_timespec(abstime, 1);
-      continue;
+      if (UNIV_LIKELY(srv_flush_sync))
+      {
+        buf_flush_sync_for_checkpoint(lsn_limit);
+        last_pages= 0;
+        set_timespec(abstime, 1);
+        continue;
+      }
     }
-
-    if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED)
+    else if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED)
       break;
 
-    mysql_cond_timedwait(&buf_pool.do_flush_list, &buf_pool.flush_list_mutex,
-                         &abstime);
+    if (buf_pool.page_cleaner_idle())
+      my_cond_wait(&buf_pool.do_flush_list,
+                   &buf_pool.flush_list_mutex.m_mutex);
+    else
+      my_cond_timedwait(&buf_pool.do_flush_list,
+                        &buf_pool.flush_list_mutex.m_mutex, &abstime);
+
     set_timespec(abstime, 1);
 
     lsn_limit= buf_flush_sync_lsn;
 
     if (UNIV_UNLIKELY(lsn_limit != 0))
-      goto furious_flush;
-
-    if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED)
+    {
+      if (UNIV_LIKELY(srv_flush_sync))
+        goto furious_flush;
+    }
+    else if (srv_shutdown_state > SRV_SHUTDOWN_INITIATED)
       break;
 
     const ulint dirty_blocks= UT_LIST_GET_LEN(buf_pool.flush_list);
 
     if (!dirty_blocks)
+    {
+      if (UNIV_UNLIKELY(lsn_limit != 0))
+      {
+        buf_flush_sync_lsn= 0;
+        /* wake up buf_flush_wait_flushed() */
+        pthread_cond_broadcast(&buf_pool.done_flush_list);
+      }
+unemployed:
+      buf_pool.page_cleaner_set_idle(true);
       continue;
+    }
 
     /* We perform dirty reads of the LRU+free list lengths here.
     Division by zero is not possible, because buf_pool.flush_list is
@@ -2086,19 +2135,38 @@ furious_flush:
     const double dirty_pct= double(dirty_blocks) * 100.0 /
       double(UT_LIST_GET_LEN(buf_pool.LRU) + UT_LIST_GET_LEN(buf_pool.free));
 
-    if (dirty_pct < srv_max_dirty_pages_pct_lwm)
-      continue;
+    if (lsn_limit);
+    else if (srv_max_dirty_pages_pct_lwm != 0.0)
+    {
+      if (dirty_pct < srv_max_dirty_pages_pct_lwm)
+        goto unemployed;
+    }
+    else if (dirty_pct < srv_max_buf_pool_modified_pct)
+      goto unemployed;
 
-    const lsn_t oldest_lsn= buf_pool.get_oldest_modification(0);
+    const lsn_t oldest_lsn= buf_pool.get_oldest_modified()
+      ->oldest_modification();
+    ut_ad(oldest_lsn);
 
+    if (UNIV_UNLIKELY(lsn_limit != 0) && oldest_lsn >= lsn_limit)
+      buf_flush_sync_lsn= 0;
+
+    buf_pool.page_cleaner_set_idle(false);
     mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
     ulint n_flushed;
 
-    if (!srv_adaptive_flushing)
+    if (UNIV_UNLIKELY(lsn_limit != 0))
+    {
+      n_flushed= buf_flush_lists(srv_max_io_capacity, lsn_limit);
+      /* wake up buf_flush_wait_flushed() */
+      pthread_cond_broadcast(&buf_pool.done_flush_list);
+      goto try_checkpoint;
+    }
+    else if (!srv_adaptive_flushing)
     {
       n_flushed= buf_flush_lists(srv_io_capacity, LSN_MAX);
-
+try_checkpoint:
       if (n_flushed)
       {
         MONITOR_INC_VALUE_CUMULATIVE(MONITOR_FLUSH_BACKGROUND_TOTAL_PAGE,
@@ -2119,6 +2187,7 @@ do_checkpoint:
     }
     else if (ulint n= page_cleaner_flush_pages_recommendation(last_pages,
                                                               oldest_lsn,
+                                                              dirty_blocks,
                                                               dirty_pct))
     {
       page_cleaner.flush_pass++;
@@ -2134,6 +2203,11 @@ do_checkpoint:
                                      n_flushed);
         goto do_checkpoint;
       }
+    }
+    else
+    {
+      mysql_mutex_lock(&buf_pool.flush_list_mutex);
+      goto unemployed;
     }
 
 #ifdef UNIV_DEBUG
@@ -2163,7 +2237,7 @@ next:
   if (UNIV_UNLIKELY(lsn_limit != 0))
     goto furious_flush;
   buf_page_cleaner_is_active= false;
-  mysql_cond_broadcast(&buf_pool.done_flush_list);
+  pthread_cond_broadcast(&buf_pool.done_flush_list);
   mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 
   my_thread_end();
@@ -2217,8 +2291,8 @@ ATTRIBUTE_COLD void buf_flush_buffer_pool()
       set_timespec(abstime, INNODB_EXTEND_TIMEOUT_INTERVAL / 2);
       mysql_mutex_lock(&buf_pool.mutex);
       while (buf_pool.n_flush_list)
-        mysql_cond_timedwait(&buf_pool.done_flush_list, &buf_pool.mutex,
-                             &abstime);
+        my_cond_timedwait(&buf_pool.done_flush_list, &buf_pool.mutex.m_mutex,
+                          &abstime);
       mysql_mutex_unlock(&buf_pool.mutex);
     }
   }
@@ -2253,7 +2327,8 @@ void buf_flush_sync()
 struct	Check {
 	void operator()(const buf_page_t* elem) const
 	{
-		ut_a(elem->oldest_modification());
+		ut_ad(elem->oldest_modification());
+		ut_ad(!fsp_is_system_temporary(elem->id().space()));
 	}
 };
 

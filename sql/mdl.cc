@@ -1157,7 +1157,7 @@ MDL_wait::timed_wait(MDL_context_owner *owner, struct timespec *abs_timeout,
                    DBUG_ASSERT(!debug_sync_set_action((owner->get_thd()),
                                                       STRING_WITH_LEN(act)));
                  };);
-    if (wsrep_thd_is_BF(owner->get_thd(), false))
+    if (WSREP_ON && wsrep_thd_is_BF(owner->get_thd(), false))
     {
       wait_result= mysql_cond_wait(&m_COND_wait_status, &m_LOCK_wait_status);
     }
@@ -1210,7 +1210,7 @@ void MDL_lock::Ticket_list::add_ticket(MDL_ticket *ticket)
   */
   DBUG_ASSERT(ticket->get_lock());
 #ifdef WITH_WSREP
-  if ((this == &(ticket->get_lock()->m_waiting)) &&
+  if (WSREP_ON && (this == &(ticket->get_lock()->m_waiting)) &&
       wsrep_thd_is_BF(ticket->get_ctx()->get_thd(), false))
   {
     DBUG_ASSERT(WSREP(ticket->get_ctx()->get_thd()));
@@ -3039,14 +3039,16 @@ void MDL_context::rollback_to_savepoint(const MDL_savepoint &mdl_savepoint)
   implementation of COMMIT (implicit or explicit) and ROLLBACK.
 */
 
-void MDL_context::release_transactional_locks()
+void MDL_context::release_transactional_locks(THD *thd)
 {
   DBUG_ENTER("MDL_context::release_transactional_locks");
+  /* Fail if there are active transactions */
+  DBUG_ASSERT(!(thd->server_status &
+                (SERVER_STATUS_IN_TRANS | SERVER_STATUS_IN_TRANS_READONLY)));
   release_locks_stored_before(MDL_STATEMENT, NULL);
   release_locks_stored_before(MDL_TRANSACTION, NULL);
   DBUG_VOID_RETURN;
 }
-
 
 void MDL_context::release_statement_locks()
 {

@@ -4,7 +4,7 @@ Copyright (c) 2000, 2020, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2008, 2009 Google Inc.
 Copyright (c) 2009, Percona Inc.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -63,6 +63,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 
 #include <my_service_manager.h>
 #include <key.h>
+#include <sql_manager.h>
 
 /* Include necessary InnoDB headers */
 #include "btr0btr.h"
@@ -509,19 +510,12 @@ const struct _ft_vft_ext ft_vft_ext_result = {innobase_fts_get_version,
 /* All RWLOCK used in Innodb are SX-locks */
 # define PSI_RWLOCK_KEY(n) {&n##_key, #n, PSI_RWLOCK_FLAG_SX}
 
-/* Keys to register pthread mutexes/cond in the current file with
+/* Keys to register pthread mutexes in the current file with
 performance schema */
-static mysql_pfs_key_t	commit_cond_mutex_key;
-static mysql_pfs_key_t	commit_cond_key;
 static mysql_pfs_key_t	pending_checkpoint_mutex_key;
 
 static PSI_mutex_info	all_pthread_mutexes[] = {
-	PSI_KEY(commit_cond_mutex),
 	PSI_KEY(pending_checkpoint_mutex),
-};
-
-static PSI_cond_info	all_innodb_conds[] = {
-	PSI_KEY(commit_cond)
 };
 
 # ifdef UNIV_PFS_MUTEX
@@ -541,6 +535,7 @@ static PSI_mutex_info all_innodb_mutexes[] = {
 	PSI_KEY(ibuf_bitmap_mutex),
 	PSI_KEY(ibuf_mutex),
 	PSI_KEY(ibuf_pessimistic_insert_mutex),
+	PSI_KEY(index_online_log),
 	PSI_KEY(log_sys_mutex),
 	PSI_KEY(page_zip_stat_per_index_mutex),
 	PSI_KEY(purge_sys_pq_mutex),
@@ -574,12 +569,6 @@ performance schema instrumented if "UNIV_PFS_RWLOCK"
 is defined */
 static PSI_rwlock_info all_innodb_rwlocks[] = {
 	PSI_RWLOCK_KEY(btr_search_latch),
-#  ifndef PFS_SKIP_BUFFER_MUTEX_RWLOCK
-	PSI_RWLOCK_KEY(buf_block_lock),
-#  endif /* !PFS_SKIP_BUFFER_MUTEX_RWLOCK */
-#  ifdef UNIV_DEBUG
-	PSI_RWLOCK_KEY(buf_block_debug_latch),
-#  endif /* UNIV_DEBUG */
 	PSI_RWLOCK_KEY(dict_operation_lock),
 	PSI_RWLOCK_KEY(fil_space_latch),
 	PSI_RWLOCK_KEY(fts_cache_rw_lock),
@@ -587,7 +576,6 @@ static PSI_rwlock_info all_innodb_rwlocks[] = {
 	PSI_RWLOCK_KEY(trx_i_s_cache_lock),
 	PSI_RWLOCK_KEY(trx_purge_latch),
 	PSI_RWLOCK_KEY(index_tree_rw_lock),
-	PSI_RWLOCK_KEY(index_online_log),
 };
 # endif /* UNIV_PFS_RWLOCK */
 
@@ -925,8 +913,7 @@ static SHOW_VAR innodb_status_variables[]= {
    &export_vars.innodb_buffer_pool_read_requests, SHOW_SIZE_T},
   {"buffer_pool_reads",
    &export_vars.innodb_buffer_pool_reads, SHOW_SIZE_T},
-  {"buffer_pool_wait_free",
-   &export_vars.innodb_buffer_pool_wait_free, SHOW_SIZE_T},
+  {"buffer_pool_wait_free", &buf_pool.stat.LRU_waits, SHOW_SIZE_T},
   {"buffer_pool_write_requests",
    &export_vars.innodb_buffer_pool_write_requests, SHOW_SIZE_T},
   {"checkpoint_age", &export_vars.innodb_checkpoint_age, SHOW_SIZE_T},
@@ -1337,6 +1324,30 @@ innobase_show_status(
 	stat_print_fn*		stat_print,
 	enum ha_stat_type	stat_type);
 
+/** After ALTER TABLE, recompute statistics. */
+inline void ha_innobase::reload_statistics()
+{
+  if (dict_table_t *table= m_prebuilt ? m_prebuilt->table : nullptr)
+  {
+    if (table->is_readable())
+      dict_stats_init(table);
+    else
+      table->stat_initialized= 1;
+  }
+}
+
+/** After ALTER TABLE, recompute statistics. */
+static int innodb_notify_tabledef_changed(handlerton *,
+                                          LEX_CSTRING *, LEX_CSTRING *,
+                                          LEX_CUSTRING *, LEX_CUSTRING *,
+                                          handler *handler)
+{
+  DBUG_ENTER("innodb_notify_tabledef_changed");
+  if (handler)
+    static_cast<ha_innobase*>(handler)->reload_statistics();
+  DBUG_RETURN(0);
+}
+
 /****************************************************************//**
 Parse and enable InnoDB monitor counters during server startup.
 User can enable monitor counters/groups by specifying
@@ -1495,7 +1506,7 @@ thd_trx_is_auto_commit(
 	       && !thd_test_options(
 		       thd,
 		       OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN)
-	       && thd_is_select(thd));
+	       && thd_sql_command(thd) == SQLCOM_SELECT);
 }
 
 /******************************************************************//**
@@ -1529,17 +1540,6 @@ thd_query_start_micro(
 	const THD*	thd)	/*!< in: thread handle */
 {
 	return thd_start_utime(thd);
-}
-
-/******************************************************************//**
-Returns true if the thread is executing a SELECT statement.
-@return true if thd is executing SELECT */
-ibool
-thd_is_select(
-/*==========*/
-	const THD*	thd)	/*!< in: thread handle */
-{
-	return(thd_sql_command(thd) == SQLCOM_SELECT);
 }
 
 /******************************************************************//**
@@ -1595,9 +1595,7 @@ thd_to_trx_id(
 	return(thd_to_trx(thd)->id);
 }
 
-static int
-wsrep_abort_transaction(handlerton* hton, THD *bf_thd, THD *victim_thd,
-			my_bool signal);
+static void wsrep_abort_transaction(handlerton*, THD *, THD *, my_bool);
 static int innobase_wsrep_set_checkpoint(handlerton* hton, const XID* xid);
 static int innobase_wsrep_get_checkpoint(handlerton* hton, XID* xid);
 #endif /* WITH_WSREP */
@@ -2593,18 +2591,17 @@ innobase_register_trx(
 	THD*		thd,	/* in: MySQL thd (connection) object */
 	trx_t*		trx)	/* in: transaction to register */
 {
-	const ulonglong	trx_id = static_cast<ulonglong>(
-		trx_get_id_for_print(trx));
+  ut_ad(!trx->active_commit_ordered);
+  const trx_id_t trx_id= trx->id;
 
-	trans_register_ha(thd, FALSE, hton, trx_id);
+  trans_register_ha(thd, false, hton, trx_id);
 
-	if (!trx_is_registered_for_2pc(trx)
-	    && thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN)) {
-
-		trans_register_ha(thd, TRUE, hton, trx_id);
-	}
-
-	trx_register_for_2pc(trx);
+  if (!trx->is_registered)
+  {
+    trx->is_registered= true;
+    if (thd_test_options(thd, OPTION_NOT_AUTOCOMMIT | OPTION_BEGIN))
+      trans_register_ha(thd, true, hton, trx_id);
+  }
 }
 
 /*	BACKGROUND INFO: HOW THE MYSQL QUERY CACHE WORKS WITH INNODB
@@ -3104,10 +3101,12 @@ ha_innobase::init_table_handle_for_HANDLER(void)
 	reset_template();
 }
 
-/** Free tablespace resources allocated. */
-void innobase_space_shutdown()
+/*********************************************************************//**
+Free any resources that were allocated and return failure.
+@return always return 1 */
+static int innodb_init_abort()
 {
-	DBUG_ENTER("innobase_space_shutdown");
+	DBUG_ENTER("innodb_init_abort");
 
 	if (fil_system.temp_space) {
 		fil_system.temp_space->close();
@@ -3122,16 +3121,6 @@ void innobase_space_shutdown()
 #ifdef WITH_INNODB_DISALLOW_WRITES
 	os_event_destroy(srv_allow_writes_event);
 #endif /* WITH_INNODB_DISALLOW_WRITES */
-
-	DBUG_VOID_RETURN;
-}
-
-/** Free any resources that were allocated and return failure.
-@return always return 1 */
-static int innodb_init_abort()
-{
-	DBUG_ENTER("innodb_init_abort");
-	innobase_space_shutdown();
 	DBUG_RETURN(1);
 }
 
@@ -3773,9 +3762,6 @@ static int innodb_init_params()
 	}
 
 #ifdef LINUX_NATIVE_AIO
-	if (srv_use_native_aio) {
-		ib::info() << "Using Linux native AIO";
-	}
 #elif !defined _WIN32
 	/* Currently native AIO is supported only on windows and linux
 	and that also when the support is compiled in. In all other
@@ -3846,6 +3832,7 @@ static int innodb_init(void* p)
 
 	innobase_hton->flush_logs = innobase_flush_logs;
 	innobase_hton->show_status = innobase_show_status;
+	innobase_hton->notify_tabledef_changed= innodb_notify_tabledef_changed;
 	innobase_hton->flags =
 		HTON_SUPPORTS_EXTENDED_KEYS | HTON_SUPPORTS_FOREIGN_KEYS
 		| HTON_NATIVE_SYS_VERSIONING | HTON_WSREP_REPLICATION;
@@ -3922,9 +3909,6 @@ static int innodb_init(void* p)
 	count = array_elements(all_innodb_files);
 	mysql_file_register("innodb", all_innodb_files, count);
 # endif /* UNIV_PFS_IO */
-
-	count = array_elements(all_innodb_conds);
-	mysql_cond_register("innodb", all_innodb_conds, count);
 #endif /* HAVE_PSI_INTERFACE */
 
 	bool	create_new_db = false;
@@ -3960,9 +3944,6 @@ static int innodb_init(void* p)
 		*innobase_hton = *innodb_hton_ptr;
 	}
 #endif /* MYSQL_DYNAMIC_PLUGIN */
-
-	/* Currently, monitor counter information are not persistent. */
-	memset(monitor_set_tbl, 0, sizeof monitor_set_tbl);
 
 	memset(innodb_counter_value, 0, sizeof innodb_counter_value);
 
@@ -4017,7 +3998,6 @@ innobase_end(handlerton*, ha_panic_function)
 
 
 		innodb_shutdown();
-		innobase_space_shutdown();
 
 		mysql_mutex_destroy(&pending_checkpoint_mutex);
 	}
@@ -4684,7 +4664,7 @@ static int innobase_close_connection(handlerton *hton, THD *thd)
   return 0;
 }
 
-UNIV_INTERN void lock_cancel_waiting_and_release(lock_t* lock);
+void lock_cancel_waiting_and_release(lock_t *lock);
 
 /** Cancel any pending lock request associated with the current THD.
 @sa THD::awake() @sa ha_kill_query() */
@@ -4694,6 +4674,7 @@ static void innobase_kill_query(handlerton*, THD *thd, enum thd_kill_levels)
 
   if (trx_t* trx= thd_to_trx(thd))
   {
+    ut_ad(trx->mysql_thd == thd);
 #ifdef WITH_WSREP
     if (trx->is_wsrep() && wsrep_thd_is_aborting(thd))
       /* if victim has been signaled by BF thread and/or aborting is already
@@ -4702,28 +4683,15 @@ static void innobase_kill_query(handlerton*, THD *thd, enum thd_kill_levels)
       DBUG_VOID_RETURN;
 #endif /* WITH_WSREP */
     lock_mutex_enter();
-    trx_sys.trx_list.freeze();
-    trx_mutex_enter(trx);
-    /* It is possible that innobase_close_connection() is concurrently
-    being executed on our victim. Even if the trx object is later
-    reused for another client connection or a background transaction,
-    its trx->mysql_thd will differ from our thd.
-
-    trx_sys.trx_list is thread-safe. It's freezed to 'protect'
-    trx_t. However, trx_t::commit_in_memory() changes a trx_t::state
-    of autocommit non-locking transactions without any protection.
-
-    At this point, trx may have been reallocated for another client
-    connection, or for a background operation. In that case, either
-    trx_t::state or trx_t::mysql_thd should not match our expectations. */
-    bool cancel= trx->mysql_thd == thd && trx->state == TRX_STATE_ACTIVE &&
-      !trx->lock.was_chosen_as_deadlock_victim;
-    trx_sys.trx_list.unfreeze();
-    if (!cancel);
-    else if (lock_t *lock= trx->lock.wait_lock)
+    if (lock_t *lock= trx->lock.wait_lock)
+    {
+      trx_mutex_enter(trx);
+      if (trx->is_wsrep() && wsrep_thd_is_aborting(thd))
+        trx->lock.was_chosen_as_deadlock_victim= TRUE;
       lock_cancel_waiting_and_release(lock);
+      trx_mutex_exit(trx);
+    }
     lock_mutex_exit();
-    trx_mutex_exit(trx);
   }
 
   DBUG_VOID_RETURN;
@@ -8357,6 +8325,18 @@ ha_innobase::update_row(
 		MySQL that the row is not really updated and it
 		should not increase the count of updated rows.
 		This is fix for http://bugs.mysql.com/29157 */
+		if (m_prebuilt->versioned_write
+		    && thd_sql_command(m_user_thd) != SQLCOM_ALTER_TABLE
+		    /* Multiple UPDATE of same rows in single transaction create
+		       historical rows only once. */
+		    && trx->id != table->vers_start_id()) {
+			error = row_insert_for_mysql((byte*) old_row,
+						     m_prebuilt,
+						     ROW_INS_HISTORICAL);
+			if (error != DB_SUCCESS) {
+				goto func_exit;
+			}
+		}
 		DBUG_RETURN(HA_ERR_RECORD_IS_THE_SAME);
 	} else {
 		const bool vers_set_fields = m_prebuilt->versioned_write
@@ -15264,24 +15244,6 @@ struct table_list_item {
 	const char*		name;
 };
 
-/** Structure to compare two st_tablename objects using their
-db and tablename. It is used in the ordering of cascade_fk_set.
-It returns true if the first argument precedes the second argument
-and false otherwise. */
-struct tablename_compare {
-
-	bool operator()(const st_handler_tablename lhs,
-			const st_handler_tablename rhs) const
-	{
-		int cmp = strcmp(lhs.db, rhs.db);
-		if (cmp == 0) {
-			cmp = strcmp(lhs.tablename, rhs.tablename);
-		}
-
-		return(cmp < 0);
-	}
-};
-
 /*****************************************************************//**
 Checks if ALTER TABLE may change the storage engine of the table.
 Changing storage engines is not allowed for tables for which there
@@ -16287,6 +16249,7 @@ innobase_show_status(
 	/* Success */
 	return(false);
 }
+
 /*********************************************************************//**
 Returns number of THR_LOCK locks used for one instance of InnoDB table.
 InnoDB no longer relies on THR_LOCK locks so 0 value is returned.
@@ -17205,7 +17168,8 @@ innodb_io_capacity_update(
 				    " higher than innodb_io_capacity_max %lu",
 				    in_val, srv_max_io_capacity);
 
-		srv_max_io_capacity = in_val * 2;
+		srv_max_io_capacity = (in_val & ~(~0UL >> 1))
+			? in_val : in_val * 2;
 
 		push_warning_printf(thd, Sql_condition::WARN_LEVEL_WARN,
 				    ER_WRONG_ARGUMENTS,
@@ -17245,6 +17209,7 @@ innodb_max_dirty_pages_pct_update(
 	}
 
 	srv_max_buf_pool_modified_pct = in_val;
+	pthread_cond_signal(&buf_pool.do_flush_list);
 }
 
 /****************************************************************//**
@@ -17275,6 +17240,7 @@ innodb_max_dirty_pages_pct_lwm_update(
 	}
 
 	srv_max_dirty_pages_pct_lwm = in_val;
+	pthread_cond_signal(&buf_pool.do_flush_list);
 }
 
 /*************************************************************//**
@@ -18682,71 +18648,55 @@ static struct st_mysql_storage_engine innobase_storage_engine=
 { MYSQL_HANDLERTON_INTERFACE_VERSION };
 
 #ifdef WITH_WSREP
-void
-wsrep_abort_slave_trx(
-/*==================*/
-	wsrep_seqno_t bf_seqno,
-	wsrep_seqno_t victim_seqno)
+
+struct bg_wsrep_kill_trx_arg {
+       my_thread_id    thd_id, bf_thd_id;
+       trx_id_t        trx_id, bf_trx_id;
+       bool            signal;
+};
+
+/** Kill one transaction from a background manager thread
+
+wsrep_innobase_kill_one_trx() is invoked when lock_sys.mutex and trx mutex
+are taken, wsrep_thd_bf_abort() cannot be used there as it takes THD mutexes
+that must be taken before lock_sys.mutex and trx mutex. That's why
+wsrep_innobase_kill_one_trx only posts the killing task to the manager thread
+and the actual killing happens asynchronously here.
+
+As no mutexes were held we don't know whether THD or trx pointers are still
+valid, so we need to pass thread/trx ids and perform a lookup.
+*/
+static void bg_wsrep_kill_trx(void *void_arg)
 {
-	WSREP_ERROR("Trx %lld tries to abort slave trx %lld. This could be "
-		"caused by:\n\t"
-		"1) unsupported configuration options combination, please check documentation.\n\t"
-		"2) a bug in the code.\n\t"
-		"3) a database corruption.\n Node consistency compromized, "
-		"need to abort. Restart the node to resync with cluster.",
-		(long long)bf_seqno, (long long)victim_seqno);
-	abort();
-}
+	bg_wsrep_kill_trx_arg *arg= (bg_wsrep_kill_trx_arg *)void_arg;
+	THD *thd, *bf_thd;
+	trx_t *victim_trx;
+	bool aborting= false;
 
-/*******************************************************************//**
-This function is used to kill one transaction in BF. */
+	if ((bf_thd= find_thread_by_id(arg->bf_thd_id)))
+		wsrep_thd_LOCK(bf_thd);
+	if ((thd= find_thread_by_id(arg->thd_id)))
+		wsrep_thd_LOCK(thd);
 
-/** This function is used to kill one transaction.
+	if (!thd || !bf_thd || !(victim_trx= thd_to_trx(thd)))
+		goto ret0;
 
-This transaction was open on this node (not-yet-committed), and a
-conflicting writeset from some other node that was being applied
-caused a locking conflict.  First committed (from other node)
-wins, thus open transaction is rolled back.  BF stands for
-brute-force: any transaction can get aborted by galera any time
-it is necessary.
+	lock_mutex_enter();
+	trx_mutex_enter(victim_trx);
+	if (victim_trx->id != arg->trx_id)
+	{
+		/* apparently victim trx was meanwhile rolled back.
+		tell bf thd not to wait, in case it already started to */
+		trx_t *trx= thd_to_trx(bf_thd);
+		if (lock_t *lock= trx->lock.wait_lock) {
+		  trx_mutex_enter(trx);
+		  lock_cancel_waiting_and_release(lock);
+		  trx_mutex_exit(trx);
+		}
+		goto ret1;
+	}
 
-This conflict can happen only when the replicated writeset (from
-other node) is being applied, not when it’s waiting in the queue.
-If our local transaction reached its COMMIT and this conflicting
-writeset was in the queue, then it should fail the local
-certification test instead.
-
-A brute force abort is only triggered by a locking conflict
-between a writeset being applied by an applier thread (slave thread)
-and an open transaction on the node, not by a Galera writeset
-comparison as in the local certification failure.
-
-@param[in]	bf_thd		Brute force (BF) thread
-@param[in,out]	victim_trx	Vimtim trx to be killed
-@param[in]	signal		Should victim be signaled */
-UNIV_INTERN
-int
-wsrep_innobase_kill_one_trx(THD* bf_thd, trx_t *victim_trx,
-			    bool signal)
-{
-	ut_ad(bf_thd);
-	ut_ad(victim_trx);
-	ut_ad(lock_mutex_own());
-	ut_ad(trx_mutex_own(victim_trx));
-
-	DBUG_ENTER("wsrep_innobase_kill_one_trx");
-
-	THD *thd= (THD *) victim_trx->mysql_thd;
-	ut_ad(thd);
-	/* Note that bf_trx might not exist here e.g. on MDL conflict
-	case (test: galera_concurrent_ctas). Similarly, BF thread
-	could be also acquiring MDL-lock causing victim to be
-	aborted. However, we have not yet called innobase_trx_init()
-	for BF transaction (test: galera_many_columns)*/
-	trx_t* bf_trx= thd_to_trx(bf_thd);
 	DBUG_ASSERT(wsrep_on(bf_thd));
-
-	wsrep_thd_LOCK(thd);
 
 	WSREP_LOG_CONFLICT(bf_thd, thd, TRUE);
 
@@ -18754,7 +18704,7 @@ wsrep_innobase_kill_one_trx(THD* bf_thd, trx_t *victim_trx,
 		"seqno: %lld client_state: %s client_mode: %s transaction_mode: %s "
 		"query: %s",
 		wsrep_thd_is_BF(bf_thd, false) ? "BF" : "normal",
-		bf_trx ? bf_trx->id : TRX_ID_MAX,
+		arg->bf_trx_id,
 		thd_get_thread_id(bf_thd),
 		wsrep_thd_trx_seqno(bf_thd),
 		wsrep_thd_client_state_str(bf_thd),
@@ -18779,30 +18729,86 @@ wsrep_innobase_kill_one_trx(THD* bf_thd, trx_t *victim_trx,
 	if (wsrep_thd_set_wsrep_aborter(bf_thd, thd))
 	{
 	  WSREP_DEBUG("innodb kill transaction skipped due to wsrep_aborter set");
-	  wsrep_thd_UNLOCK(thd);
-	  DBUG_RETURN(0);
+	  goto ret1;
 	}
 
-	/* Note that we need to release this as it will be acquired
-	below in wsrep-lib */
-	wsrep_thd_UNLOCK(thd);
-	DEBUG_SYNC(bf_thd, "before_wsrep_thd_abort");
+	aborting= true;
 
-	if (wsrep_thd_bf_abort(bf_thd, thd, signal))
-	{
-		lock_t*  wait_lock = victim_trx->lock.wait_lock;
-		if (wait_lock) {
-			DBUG_ASSERT(victim_trx->is_wsrep());
-			WSREP_DEBUG("victim has wait flag: %lu",
-				    thd_get_thread_id(thd));
-
-			WSREP_DEBUG("canceling wait lock");
-			victim_trx->lock.was_chosen_as_deadlock_victim= TRUE;
-			lock_cancel_waiting_and_release(wait_lock);
+ret1:
+	trx_mutex_exit(victim_trx);
+	lock_mutex_exit();
+ret0:
+	if (thd) {
+		wsrep_thd_UNLOCK(thd);
+		if (aborting) {
+			DEBUG_SYNC(bf_thd, "before_wsrep_thd_abort");
+			wsrep_thd_bf_abort(bf_thd, thd, arg->signal);
 		}
+		wsrep_thd_kill_UNLOCK(thd);
 	}
+	if (bf_thd) {
+		wsrep_thd_UNLOCK(bf_thd);
+		wsrep_thd_kill_UNLOCK(bf_thd);
+	}
+	free(arg);
+}
 
-	DBUG_RETURN(0);
+/** This function is used to kill one transaction.
+
+This transaction was open on this node (not-yet-committed), and a
+conflicting writeset from some other node that was being applied
+caused a locking conflict.  First committed (from other node)
+wins, thus open transaction is rolled back.  BF stands for
+brute-force: any transaction can get aborted by galera any time
+it is necessary.
+
+This conflict can happen only when the replicated writeset (from
+other node) is being applied, not when it’s waiting in the queue.
+If our local transaction reached its COMMIT and this conflicting
+writeset was in the queue, then it should fail the local
+certification test instead.
+
+A brute force abort is only triggered by a locking conflict
+between a writeset being applied by an applier thread (slave thread)
+and an open transaction on the node, not by a Galera writeset
+comparison as in the local certification failure.
+
+@param[in]	bf_thd		Brute force (BF) thread
+@param[in,out]	victim_trx	Vimtim trx to be killed
+@param[in]	signal		Should victim be signaled */
+void
+wsrep_innobase_kill_one_trx(
+	THD* bf_thd,
+	trx_t *victim_trx,
+	bool signal)
+{
+	ut_ad(bf_thd);
+	ut_ad(victim_trx);
+	ut_ad(lock_mutex_own());
+	ut_ad(trx_mutex_own(victim_trx));
+
+	DBUG_ENTER("wsrep_innobase_kill_one_trx");
+
+	DBUG_EXECUTE_IF("sync.before_wsrep_thd_abort",
+			 {
+			   const char act[]=
+			     "now "
+			     "SIGNAL sync.before_wsrep_thd_abort_reached "
+			     "WAIT_FOR signal.before_wsrep_thd_abort";
+			   DBUG_ASSERT(!debug_sync_set_action(bf_thd,
+							      STRING_WITH_LEN(act)));
+			 };);
+
+	trx_t* bf_trx= thd_to_trx(bf_thd);
+	bg_wsrep_kill_trx_arg *arg = (bg_wsrep_kill_trx_arg*)malloc(sizeof(*arg));
+	arg->thd_id     = thd_get_thread_id(victim_trx->mysql_thd);
+	arg->trx_id     = victim_trx->id;
+	arg->bf_thd_id  = thd_get_thread_id(bf_thd);
+	arg->bf_trx_id  = bf_trx ? bf_trx->id : TRX_ID_MAX;
+	arg->signal     = signal;
+	mysql_manager_submit(bg_wsrep_kill_trx, arg);
+
+	DBUG_VOID_RETURN;
 }
 
 /** This function forces the victim transaction to abort. Aborting the
@@ -18815,14 +18821,14 @@ wsrep_innobase_kill_one_trx(THD* bf_thd, trx_t *victim_trx,
   @return -1 victim thread was aborted (no transaction)
 */
 static
-int
+void
 wsrep_abort_transaction(
 	handlerton*,
 	THD *bf_thd,
 	THD *victim_thd,
 	my_bool signal)
 {
-	DBUG_ENTER("wsrep_innobase_abort_thd");
+	DBUG_ENTER("wsrep_abort_transaction");
 	ut_ad(bf_thd);
 	ut_ad(victim_thd);
 
@@ -18836,16 +18842,45 @@ wsrep_abort_transaction(
 	if (victim_trx) {
 		lock_mutex_enter();
 		trx_mutex_enter(victim_trx);
-		int rcode= wsrep_innobase_kill_one_trx(bf_thd,
-						       victim_trx, signal);
+		victim_trx->lock.was_chosen_as_wsrep_victim= true;
 		trx_mutex_exit(victim_trx);
 		lock_mutex_exit();
-		DBUG_RETURN(rcode);
+
+		wsrep_thd_kill_LOCK(victim_thd);
+		wsrep_thd_LOCK(victim_thd);
+		bool aborting= !wsrep_thd_set_wsrep_aborter(bf_thd, victim_thd);
+		wsrep_thd_UNLOCK(victim_thd);
+		if (aborting) {
+			DEBUG_SYNC(bf_thd, "before_wsrep_thd_abort");
+			DBUG_EXECUTE_IF("sync.before_wsrep_thd_abort",
+					 {
+					   const char act[]=
+					     "now "
+					     "SIGNAL sync.before_wsrep_thd_abort_reached "
+					     "WAIT_FOR signal.before_wsrep_thd_abort";
+					   DBUG_ASSERT(!debug_sync_set_action(bf_thd,
+									      STRING_WITH_LEN(act)));
+					 };);
+			wsrep_thd_bf_abort(bf_thd, victim_thd, signal);
+		}
+		wsrep_thd_kill_UNLOCK(victim_thd);
+		DBUG_VOID_RETURN;
 	} else {
+		DBUG_EXECUTE_IF("sync.before_wsrep_thd_abort",
+				 {
+				   const char act[]=
+				     "now "
+				     "SIGNAL sync.before_wsrep_thd_abort_reached "
+				     "WAIT_FOR signal.before_wsrep_thd_abort";
+				   DBUG_ASSERT(!debug_sync_set_action(bf_thd,
+								      STRING_WITH_LEN(act)));
+				 };);
+		wsrep_thd_kill_LOCK(victim_thd);
 		wsrep_thd_bf_abort(bf_thd, victim_thd, signal);
+		wsrep_thd_kill_UNLOCK(victim_thd);
 	}
 
-	DBUG_RETURN(-1);
+	DBUG_VOID_RETURN;
 }
 
 static
@@ -18963,13 +18998,6 @@ static MYSQL_SYSVAR_ULONG(io_capacity_max, srv_max_io_capacity,
   NULL, innodb_io_capacity_max_update,
   SRV_MAX_IO_CAPACITY_DUMMY_DEFAULT, 100,
   SRV_MAX_IO_CAPACITY_LIMIT, 0);
-
-static MYSQL_SYSVAR_ULONG(idle_flush_pct,
-  srv_idle_flush_pct,
-  PLUGIN_VAR_RQCMDARG,
-  "Up to what percentage of dirty pages should be flushed when innodb "
-  "finds it has spare resources to do so.",
-  NULL, NULL, 100, 0, 100, 0);
 
 #ifdef UNIV_DEBUG
 static MYSQL_SYSVAR_BOOL(background_drop_list_empty,
@@ -19089,7 +19117,8 @@ static MYSQL_SYSVAR_DOUBLE(max_dirty_pages_pct, srv_max_buf_pool_modified_pct,
 static MYSQL_SYSVAR_DOUBLE(max_dirty_pages_pct_lwm,
   srv_max_dirty_pages_pct_lwm,
   PLUGIN_VAR_RQCMDARG,
-  "Percentage of dirty pages at which flushing kicks in.",
+  "Percentage of dirty pages at which flushing kicks in. "
+  "The value 0 (default) means 'refer to innodb_max_dirty_pages_pct'.",
   NULL, innodb_max_dirty_pages_pct_lwm_update, 0, 0, 99.999, 0);
 
 static MYSQL_SYSVAR_DOUBLE(adaptive_flushing_lwm,
@@ -19485,15 +19514,15 @@ static MYSQL_SYSVAR_BOOL(optimize_fulltext_only, innodb_optimize_fulltext_only,
   "Only optimize the Fulltext index of the table",
   NULL, NULL, FALSE);
 
-static MYSQL_SYSVAR_ULONG(read_io_threads, srv_n_read_io_threads,
+static MYSQL_SYSVAR_UINT(read_io_threads, srv_n_read_io_threads,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "Number of background read I/O threads in InnoDB.",
   NULL, NULL, 4, 1, 64, 0);
 
-static MYSQL_SYSVAR_ULONG(write_io_threads, srv_n_write_io_threads,
+static MYSQL_SYSVAR_UINT(write_io_threads, srv_n_write_io_threads,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "Number of background write I/O threads in InnoDB.",
-  NULL, NULL, 4, 1, 64, 0);
+  NULL, NULL, 4, 2, 64, 0);
 
 static MYSQL_SYSVAR_ULONG(force_recovery, srv_force_recovery,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
@@ -20128,7 +20157,6 @@ static struct st_mysql_sys_var* innobase_system_variables[]= {
   MYSQL_SYSVAR(io_capacity),
   MYSQL_SYSVAR(io_capacity_max),
   MYSQL_SYSVAR(page_cleaners),
-  MYSQL_SYSVAR(idle_flush_pct),
   MYSQL_SYSVAR(monitor_enable),
   MYSQL_SYSVAR(monitor_disable),
   MYSQL_SYSVAR(monitor_reset),
@@ -20689,11 +20717,11 @@ innobase_get_computed_value(
 
 	field = dtuple_get_nth_v_field(row, col->v_pos);
 
-	my_bitmap_map*	old_write_set = dbug_tmp_use_all_columns(mysql_table, mysql_table->write_set);
-	my_bitmap_map*	old_read_set = dbug_tmp_use_all_columns(mysql_table, mysql_table->read_set);
+	MY_BITMAP *old_write_set = dbug_tmp_use_all_columns(mysql_table, &mysql_table->write_set);
+	MY_BITMAP *old_read_set = dbug_tmp_use_all_columns(mysql_table, &mysql_table->read_set);
 	ret = mysql_table->update_virtual_field(mysql_table->field[col->m_col.ind]);
-	dbug_tmp_restore_column_map(mysql_table->read_set, old_read_set);
-	dbug_tmp_restore_column_map(mysql_table->write_set, old_write_set);
+	dbug_tmp_restore_column_map(&mysql_table->read_set, old_read_set);
+	dbug_tmp_restore_column_map(&mysql_table->write_set, old_write_set);
 
 	if (ret != 0) {
 		DBUG_RETURN(NULL);

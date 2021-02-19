@@ -2,7 +2,7 @@
 
 Copyright (c) 1995, 2017, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -65,8 +65,8 @@ savepoint. */
 /** Push an object to an mtr memo stack. */
 #define mtr_memo_push(m, o, t)	(m)->memo_push(o, t)
 
-#define mtr_s_lock_space(s, m)	(m)->s_lock_space((s), __FILE__, __LINE__)
 #define mtr_x_lock_space(s, m)	(m)->x_lock_space((s), __FILE__, __LINE__)
+#define mtr_sx_lock_space(s, m) (m)->sx_lock_space((s), __FILE__, __LINE__)
 
 #define mtr_s_lock_index(i, m)	(m)->s_lock(&(i)->lock, __FILE__, __LINE__)
 #define mtr_x_lock_index(i, m)	(m)->x_lock(&(i)->lock, __FILE__, __LINE__)
@@ -150,6 +150,10 @@ struct mtr_t {
     m_log_mode= mode & 3;
     return old_mode;
   }
+
+  /** Check if we are holding a block latch in exclusive mode
+  @param block  buffer pool block to search for */
+  bool have_x_latch(const buf_block_t &block) const;
 
 	/** Copy the tablespaces associated with the mini-transaction
 	(needed for generating FILE_MODIFY records)
@@ -248,18 +252,6 @@ struct mtr_t {
 		memo_push(lock, MTR_MEMO_SX_LOCK);
 	}
 
-	/** Acquire a tablespace S-latch.
-	@param[in]	space	tablespace
-	@param[in]	file	file name from where called
-	@param[in]	line	line number in file */
-	void s_lock_space(fil_space_t* space, const char* file, unsigned line)
-	{
-		ut_ad(space->purpose == FIL_TYPE_TEMPORARY
-		      || space->purpose == FIL_TYPE_IMPORT
-		      || space->purpose == FIL_TYPE_TABLESPACE);
-		s_lock(&space->latch, file, line);
-	}
-
 	/** Acquire a tablespace X-latch.
 	@param[in]	space	tablespace
 	@param[in]	file	file name from where called
@@ -272,6 +264,18 @@ struct mtr_t {
 		memo_push(space, MTR_MEMO_SPACE_X_LOCK);
 		rw_lock_x_lock_inline(&space->latch, 0, file, line);
 	}
+
+ /** Acquire a tablespace SX-latch.
+ @param[in]	space	tablespace
+ @param[in]	file	file name from where called
+ @param[in]	line	line number in file */
+ void sx_lock_space(fil_space_t *space, const char *file, unsigned line)
+ {
+   ut_ad(space->purpose == FIL_TYPE_TEMPORARY
+         || space->purpose == FIL_TYPE_IMPORT
+	 || space->purpose == FIL_TYPE_TABLESPACE);
+   sx_lock(&space->latch, file, line);
+ }
 
 	/** Release an object in the memo stack.
 	@param object	object
@@ -312,24 +316,12 @@ public:
   /** @return true if we are inside the change buffer code */
   bool is_inside_ibuf() const { return m_inside_ibuf; }
 
-  /** Note that system tablespace page has been freed. */
-  void freed_system_tablespace_page() { m_freed_in_system_tablespace= true; }
-
   /** Note that pages has been trimed */
   void set_trim_pages() { m_trim_pages= true; }
 
   /** @return true if pages has been trimed */
   bool is_trim_pages() { return m_trim_pages; }
 
-  /** @return whether a page_compressed table was modified */
-  bool is_page_compressed() const
-  {
-#if defined(HAVE_FALLOC_PUNCH_HOLE_AND_KEEP_SIZE) || defined(_WIN32)
-    return m_user_space && m_user_space->is_compressed();
-#else
-    return false;
-#endif
-  }
 #ifdef UNIV_DEBUG
   /** Check if we are holding an rw-latch in this mini-transaction
   @param lock   latch to search for
@@ -372,12 +364,6 @@ public:
 
 	/** @return the memo stack */
 	mtr_buf_t* get_memo() { return &m_memo; }
-
-  /** @return true if system tablespace page has been freed */
-  bool is_freed_system_tablespace_page()
-  {
-    return m_freed_in_system_tablespace;
-  }
 #endif /* UNIV_DEBUG */
 
 	/** @return true if a record was added to the mini-transaction */
@@ -583,12 +569,18 @@ public:
                           const char *new_path= nullptr);
 
   /** Add freed page numbers to freed_pages */
-  void add_freed_offset(page_id_t id)
+  void add_freed_offset(fil_space_t *space, uint32_t page)
   {
-    ut_ad(m_user_space == NULL || id.space() == m_user_space->id);
+    ut_ad(is_named_space(space));
     if (!m_freed_pages)
+    {
       m_freed_pages= new range_set();
-    m_freed_pages->add_value(id.page_no());
+      ut_ad(!m_freed_space);
+      m_freed_space= space;
+    }
+    else
+      ut_ad(m_freed_space == space);
+    m_freed_pages->add_value(page);
   }
 
   /** Determine the added buffer fix count of a block.
@@ -666,9 +658,6 @@ private:
   to suppress some read-ahead operations, @see ibuf_inside() */
   uint16_t m_inside_ibuf:1;
 
-  /** whether the page has been freed in system tablespace */
-  uint16_t m_freed_in_system_tablespace:1;
-
   /** whether the pages has been trimmed */
   uint16_t m_trim_pages:1;
 
@@ -690,6 +679,8 @@ private:
   /** LSN at commit time */
   lsn_t m_commit_lsn;
 
+  /** tablespace where pages have been freed */
+  fil_space_t *m_freed_space= nullptr;
   /** set of freed page ids */
   range_set *m_freed_pages= nullptr;
 };

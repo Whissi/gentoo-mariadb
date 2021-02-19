@@ -112,7 +112,7 @@ struct LatchDebug {
 			const os_thread_id_t& rhs) const
 			UNIV_NOTHROW
 		{
-			return(os_thread_pf(lhs) < os_thread_pf(rhs));
+			return(ulint(lhs) < ulint(rhs));
 		}
 	};
 
@@ -544,7 +544,7 @@ LatchDebug::crash(
 		get_level_name(latched->m_level);
 
 	ib::error()
-		<< "Thread " << os_thread_pf(os_thread_get_curr_id())
+		<< "Thread " << os_thread_get_curr_id()
 		<< " already owns a latch "
 		<< sync_latch_get_name(latch->m_id) << " at level"
 		<< " " << latched->m_level << " (" << latch_level_name
@@ -1307,11 +1307,11 @@ sync_latch_meta_init()
 	LATCH_ADD_RWLOCK(BTR_SEARCH, SYNC_SEARCH_SYS, btr_search_latch_key);
 
 	LATCH_ADD_RWLOCK(BUF_BLOCK_LOCK, SYNC_LEVEL_VARYING,
-			 buf_block_lock_key);
+			 PFS_NOT_INSTRUMENTED);
 
 #ifdef UNIV_DEBUG
 	LATCH_ADD_RWLOCK(BUF_BLOCK_DEBUG, SYNC_LEVEL_VARYING,
-			 buf_block_debug_latch_key);
+			 PFS_NOT_INSTRUMENTED);
 #endif /* UNIV_DEBUG */
 
 	LATCH_ADD_RWLOCK(DICT_OPERATION, SYNC_DICT_OPERATION,

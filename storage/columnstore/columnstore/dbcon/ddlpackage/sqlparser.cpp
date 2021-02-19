@@ -63,6 +63,11 @@ void SqlParser::setDefaultSchema(std::string schema)
     x.fDBSchema = schema;
 }
 
+void SqlParser::setDefaultCharset(const CHARSET_INFO* default_charset)
+{
+    x.default_table_charset = default_charset;
+}
+
 int SqlParser::Parse(const char* sqltext)
 {
     ddllex_init_extra(&scanData, &x.scanner);
@@ -126,7 +131,7 @@ int SqlFileParser::Parse(const string& sqlfile)
         throw length_error("SqlFileParser has file size hard limit of 16K.");
     }
 
-    unsigned rcount;
+    std::streamsize rcount;
     rcount = ifsql.readsome(sqlbuf, sizeof(sqlbuf) - 1);
 
     if (rcount < 0)

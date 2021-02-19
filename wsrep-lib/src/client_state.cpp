@@ -34,6 +34,7 @@ void wsrep::client_state::open(wsrep::client_id id)
 {
     wsrep::unique_lock<wsrep::mutex> lock(mutex_);
     assert(state_ == s_none);
+    assert(keep_command_error_ == false);
     debug_log_state("open: enter");
     owning_thread_id_ = wsrep::this_thread::get_id();
     rollbacker_active_ = false;
@@ -49,8 +50,11 @@ void wsrep::client_state::close()
     wsrep::unique_lock<wsrep::mutex> lock(mutex_);
     debug_log_state("close: enter");
     state(lock, s_quitting);
+    keep_command_error_ = false;
     lock.unlock();
-    if (transaction_.active())
+    if (transaction_.active() &&
+        (mode_ != m_local ||
+         transaction_.state() != wsrep::transaction::s_prepared))
     {
         client_service_.bf_rollback();
         transaction_.after_statement();
@@ -65,6 +69,11 @@ void wsrep::client_state::close()
 void wsrep::client_state::cleanup()
 {
     wsrep::unique_lock<wsrep::mutex> lock(mutex_);
+    cleanup(lock);
+}
+
+void wsrep::client_state::cleanup(wsrep::unique_lock<wsrep::mutex>& lock)
+{
     debug_log_state("cleanup: enter");
     state(lock, s_none);
     debug_log_state("cleanup: leave");
@@ -82,8 +91,7 @@ void wsrep::client_state::override_error(enum wsrep::client_error error,
     current_error_status_ = status;
 }
 
-
-int wsrep::client_state::before_command()
+int wsrep::client_state::before_command(bool keep_command_error)
 {
     wsrep::unique_lock<wsrep::mutex> lock(mutex_);
     debug_log_state("before_command: enter");
@@ -94,6 +102,7 @@ int wsrep::client_state::before_command()
         assert(state_ == s_idle);
         do_wait_rollback_complete_and_acquire_ownership(lock);
         assert(state_ == s_exec);
+        client_service_.store_globals();
     }
     else
     {
@@ -101,6 +110,8 @@ int wsrep::client_state::before_command()
         // for example via wait_rollback_complete_and_acquire_ownership().
         assert(wsrep::this_thread::get_id() == owning_thread_id_);
     }
+
+    keep_command_error_ = keep_command_error;
 
     // If the transaction is active, it must be either executing,
     // aborted as rolled back by rollbacker, or must_abort if the
@@ -115,30 +126,41 @@ int wsrep::client_state::before_command()
 
     if (transaction_.active())
     {
-        if (transaction_.state() == wsrep::transaction::s_must_abort)
+        if (transaction_.state() == wsrep::transaction::s_must_abort ||
+            transaction_.state() == wsrep::transaction::s_aborted)
         {
+            if (transaction_.is_xa())
+            {
+                // Client will rollback explicitly, return error.
+                debug_log_state("before_command: error");
+                return 1;
+            }
+
             override_error(wsrep::e_deadlock_error);
-            lock.unlock();
-            client_service_.bf_rollback();
-            (void)transaction_.after_statement();
-            lock.lock();
-            assert(transaction_.state() ==
-                   wsrep::transaction::s_aborted);
-            assert(transaction_.active() == false);
-            assert(current_error() != wsrep::e_success);
-            debug_log_state("before_command: error");
-            return 1;
-        }
-        else if (transaction_.state() == wsrep::transaction::s_aborted)
-        {
-            // Transaction was rolled back either just before sending result
-            // to the client, or after client_state become idle.
+            if (transaction_.state() == wsrep::transaction::s_must_abort)
+            {
+                lock.unlock();
+                client_service_.bf_rollback();
+                lock.lock();
+
+            }
+
+            if (keep_command_error_)
+            {
+                // Keep the error for the next command
+                debug_log_state("before_command: keep error");
+                return 0;
+            }
+
             // Clean up the transaction and return error.
-            override_error(wsrep::e_deadlock_error);
             lock.unlock();
             (void)transaction_.after_statement();
             lock.lock();
+
             assert(transaction_.active() == false);
+            assert(transaction_.state() == wsrep::transaction::s_aborted);
+            assert(current_error() != wsrep::e_success);
+
             debug_log_state("before_command: error");
             return 1;
         }
@@ -158,7 +180,14 @@ void wsrep::client_state::after_command_before_result()
         override_error(wsrep::e_deadlock_error);
         lock.unlock();
         client_service_.bf_rollback();
-        (void)transaction_.after_statement();
+        // If keep current error is set, the result will be propagated
+        // back to client with some future command, so keep the transaction
+        // open here so that error handling can happen in before_command()
+        // hook.
+        if (not keep_command_error_)
+        {
+            (void)transaction_.after_statement();
+        }
         lock.lock();
         assert(transaction_.state() == wsrep::transaction::s_aborted);
         assert(current_error() != wsrep::e_success);
@@ -182,11 +211,12 @@ void wsrep::client_state::after_command_after_result()
         assert(transaction_.state() == wsrep::transaction::s_aborted);
         override_error(wsrep::e_deadlock_error);
     }
-    else if (transaction_.active() == false)
+    else if (transaction_.active() == false && not keep_command_error_)
     {
         current_error_ = wsrep::e_success;
         current_error_status_ = wsrep::provider::success;
     }
+    keep_command_error_ = false;
     sync_wait_gtid_ = wsrep::gtid::undefined();
     state(lock, s_idle);
     debug_log_state("after_command_after_result: leave");

@@ -1785,7 +1785,7 @@ JOIN::init_range_rowid_filters()
 int
 JOIN::optimize_inner()
 {
-  DBUG_ENTER("JOIN::optimize");
+  DBUG_ENTER("JOIN::optimize_inner");
   subq_exit_fl= false;
   do_send_rows = (unit->lim.get_select_limit()) ? 1 : 0;
 
@@ -1857,6 +1857,10 @@ JOIN::optimize_inner()
   eval_select_list_used_tables();
 
   table_count= select_lex->leaf_tables.elements;
+
+  if (select_lex->options & OPTION_SCHEMA_TABLE &&
+      optimize_schema_tables_memory_usage(select_lex->leaf_tables))
+    DBUG_RETURN(1);
 
   if (setup_ftfuncs(select_lex)) /* should be after having->fix_fields */
     DBUG_RETURN(-1);
@@ -2071,7 +2075,7 @@ JOIN::optimize_inner()
             join->optimization_state == JOIN::OPTIMIZATION_PHASE_1_DONE &&
             join->with_two_phase_optimization)
           continue;
-        /* 
+        /*
           Do not push conditions from where into materialized inner tables
           of outer joins: this is not valid.
         */
@@ -2273,7 +2277,7 @@ setup_subq_exit:
   if (with_two_phase_optimization)
     optimization_state= JOIN::OPTIMIZATION_PHASE_1_DONE;
   else
-  { 
+  {
     if (optimize_stage2())
       DBUG_RETURN(1);
   }
@@ -2293,7 +2297,7 @@ int JOIN::optimize_stage2()
 
   if (unlikely(thd->check_killed()))
     DBUG_RETURN(1);
-  
+
   /* Generate an execution plan from the found optimal join order. */
   if (get_best_combination())
     DBUG_RETURN(1);
@@ -3747,14 +3751,16 @@ JOIN::create_postjoin_aggr_table(JOIN_TAB *tab, List<Item> *table_fields,
   tab->tmp_table_param->skip_create_table= true;
   TABLE* table= create_tmp_table(thd, tab->tmp_table_param, *table_fields,
                                  table_group, distinct,
-                                 save_sum_fields, select_options, table_rows_limit, 
+                                 save_sum_fields, select_options,
+                                 table_rows_limit,
                                  &empty_clex_str, true, keep_row_order);
   if (!table)
     DBUG_RETURN(true);
   tmp_table_param.using_outer_summary_function=
     tab->tmp_table_param->using_outer_summary_function;
   tab->join= this;
-  DBUG_ASSERT(tab > tab->join->join_tab || !top_join_tab_count || !tables_list);
+  DBUG_ASSERT(tab > tab->join->join_tab || !top_join_tab_count ||
+              !tables_list);
   if (tab > join_tab)
     (tab - 1)->next_select= sub_select_postjoin_aggr;
   if (!(tab->aggr= new (thd->mem_root) AGGR_OP(tab)))
@@ -3941,7 +3947,7 @@ bool JOIN::setup_subquery_caches()
     if (tmp_having)
     {
       DBUG_ASSERT(having == NULL);
-      if (!(tmp_having= 
+      if (!(tmp_having=
             tmp_having->transform(thd,
                                   &Item::expr_cache_insert_transformer,
                                   NULL)))
@@ -4260,8 +4266,9 @@ void JOIN::exec_inner()
   /*
     Enable LIMIT ROWS EXAMINED during query execution if:
     (1) This JOIN is the outermost query (not a subquery or derived table)
-        This ensures that the limit is enabled when actual execution begins, and
-        not if a subquery is evaluated during optimization of the outer query.
+        This ensures that the limit is enabled when actual execution begins,
+        and not if a subquery is evaluated during optimization of the outer
+        query.
     (2) This JOIN is not the result of a UNION. In this case do not apply the
         limit in order to produce the partial query result stored in the
         UNION temp table.
@@ -4533,6 +4540,63 @@ void JOIN::cleanup_item_list(List<Item> &items) const
 
 
 /**
+  @brief
+    Look for provision of the select_handler interface by a foreign engine
+
+  @param thd   The thread handler
+
+  @details
+    The function checks that this is an upper level select and if so looks
+    through its tables searching for one whose handlerton owns a
+    create_select call-back function. If the call of this function returns
+    a select_handler interface object then the server will push the select
+    query into this engine.
+    This is a responsibility of the create_select call-back function to
+    check whether the engine can execute the query.
+
+  @retval the found select_handler if the search is successful
+          0  otherwise
+*/
+
+select_handler *find_select_handler(THD *thd,
+                                    SELECT_LEX* select_lex)
+{
+  if (select_lex->next_select())
+    return 0;
+  if (select_lex->master_unit()->outer_select())
+    return 0;
+
+  TABLE_LIST *tbl= nullptr;
+  // For SQLCOM_INSERT_SELECT the server takes TABLE_LIST
+  // from thd->lex->query_tables and skips its first table
+  // b/c it is the target table for the INSERT..SELECT.
+  if (thd->lex->sql_command != SQLCOM_INSERT_SELECT)
+  {
+    tbl= select_lex->join->tables_list;
+  }
+  else if (thd->lex->query_tables &&
+           thd->lex->query_tables->next_global)
+  {
+    tbl= thd->lex->query_tables->next_global;
+  }
+  else
+    return 0;
+
+  for (;tbl; tbl= tbl->next_global)
+  {
+    if (!tbl->table)
+      continue;
+    handlerton *ht= tbl->table->file->partition_ht();
+    if (!ht->create_select)
+      continue;
+    select_handler *sh= ht->create_select(thd, select_lex);
+    return sh;
+  }
+  return 0;
+}
+
+
+/**
   An entry point to single-unit select (a select without UNION).
 
   @param thd                  thread handler
@@ -4636,7 +4700,7 @@ mysql_select(THD *thd, TABLE_LIST *tables, List<Item> &fields, COND *conds,
   }
 
   /* Look for a table owned by an engine with the select_handler interface */
-  select_lex->pushdown_select= select_lex->find_select_handler(thd);
+  select_lex->pushdown_select= find_select_handler(thd, select_lex);
 
   if ((err= join->optimize()))
   {
@@ -6855,7 +6919,7 @@ update_ref_and_keys(THD *thd, DYNAMIC_ARRAY *keyuse,JOIN_TAB *join_tab,
   Special treatment for ft-keys.
 */
 
-bool sort_and_filter_keyuse(THD *thd, DYNAMIC_ARRAY *keyuse, 
+bool sort_and_filter_keyuse(THD *thd, DYNAMIC_ARRAY *keyuse,
                             bool skip_unprefixed_keyparts)
 {
   KEYUSE key_end, *prev, *save_pos, *use;
@@ -8090,7 +8154,7 @@ best_access_path(JOIN      *join,
   pos->use_join_buffer= best_uses_jbuf;
   pos->spl_plan= spl_plan;
   pos->range_rowid_filter_info= best_filter;
-   
+
   loose_scan_opt.save_to_position(s, loose_scan_pos);
 
   if (!best_key &&
@@ -10235,7 +10299,7 @@ bool JOIN::check_two_phase_optimization(THD *thd)
     return true;
   return false;
 }
-  
+
 
 bool JOIN::inject_cond_into_where(Item *injected_cond)
 {
@@ -10266,7 +10330,7 @@ bool JOIN::inject_cond_into_where(Item *injected_cond)
       and_args->push_back(elem, thd->mem_root);
     }
   }
-  
+
   return false;
 
 }
@@ -13396,10 +13460,6 @@ void JOIN_TAB::cleanup()
 {
   DBUG_ENTER("JOIN_TAB::cleanup");
   
-  if (tab_list && tab_list->is_with_table_recursive_reference() &&
-    tab_list->with->is_cleaned())
-  DBUG_VOID_RETURN;
-
   DBUG_PRINT("enter", ("tab: %p  table %s.%s",
                        this,
                        (table ? table->s->db.str : "?"),
@@ -13768,6 +13828,9 @@ void JOIN::join_free()
   for (tmp_unit= select_lex->first_inner_unit();
        tmp_unit;
        tmp_unit= tmp_unit->next_unit())
+  {
+    if (tmp_unit->with_element && tmp_unit->with_element->is_recursive)
+      continue;
     for (sl= tmp_unit->first_select(); sl; sl= sl->next_select())
     {
       Item_subselect *subselect= sl->master_unit()->item;
@@ -13785,7 +13848,7 @@ void JOIN::join_free()
       /* Can't unlock if at least one JOIN is still needed */
       can_unlock= can_unlock && full_local;
     }
-
+  }
   /*
     We are not using tables anymore
     Unlock all tables. We may be in an INSERT .... SELECT statement.
@@ -14088,7 +14151,7 @@ static void update_depend_map_for_order(JOIN *join, ORDER *order)
 
 
 /**
-  Remove all constants and check if ORDER only contains simple
+  Remove all constants from ORDER and check if ORDER only contains simple
   expressions.
 
   We also remove all duplicate expressions, keeping only the first one.
@@ -16662,13 +16725,13 @@ static uint reset_nj_counters(JOIN *join, List<TABLE_LIST> *join_list)
   @verbatim
      IMPLEMENTATION 
        LIMITATIONS ON JOIN ORDER
-         The nested [outer] joins executioner algorithm imposes these limitations
-         on join order:
+         The nested [outer] joins executioner algorithm imposes these
+         limitations on join order:
          1. "Outer tables first" -  any "outer" table must be before any 
              corresponding "inner" table.
-         2. "No interleaving" - tables inside a nested join must form a continuous
-            sequence in join order (i.e. the sequence must not be interrupted by 
-            tables that are outside of this nested join).
+         2. "No interleaving" - tables inside a nested join must form a
+             continuous sequence in join order (i.e. the sequence must not be
+             interrupted by tables that are outside of this nested join).
 
          #1 is checked elsewhere, this function checks #2 provided that #1 has
          been already checked.
@@ -16680,34 +16743,36 @@ static uint reset_nj_counters(JOIN *join, List<TABLE_LIST> *join_list)
 
          The join order "t1 t2 t0 t3" is invalid:
 
-         table t0 is outside of the nested join, so WHERE condition for t0 is
-         attached directly to t0 (without triggers, and it may be used to access
-         t0). Applying WHERE(t0) to (t2,t0,t3) record is invalid as we may miss
-         combinations of (t1, t2, t3) that satisfy condition cond1, and produce a
-         null-complemented (t1, t2.NULLs, t3.NULLs) row, which should not have
-         been produced.
+         table t0 is outside of the nested join, so WHERE condition
+         for t0 is attached directly to t0 (without triggers, and it
+         may be used to access t0). Applying WHERE(t0) to (t2,t0,t3)
+         record is invalid as we may miss combinations of (t1, t2, t3)
+         that satisfy condition cond1, and produce a null-complemented
+         (t1, t2.NULLs, t3.NULLs) row, which should not have been
+         produced.
 
          If table t0 is not between t2 and t3, the problem doesn't exist:
-          If t0 is located after (t2,t3), WHERE(t0) is applied after nested join
-           processing has finished.
-          If t0 is located before (t2,t3), predicates like WHERE_cond(t0, t2) are
-           wrapped into condition triggers, which takes care of correct nested
-           join processing.
+          If t0 is located after (t2,t3), WHERE(t0) is applied after nested
+           join processing has finished.
+          If t0 is located before (t2,t3), predicates like WHERE_cond(t0, t2)
+           are wrapped into condition triggers, which takes care of correct
+           nested join processing.
 
        HOW IT IS IMPLEMENTED
          The limitations on join order can be rephrased as follows: for valid
          join order one must be able to:
            1. write down the used tables in the join order on one line.
-           2. for each nested join, put one '(' and one ')' on the said line        
+           2. for each nested join, put one '(' and one ')' on the said line
            3. write "LEFT JOIN" and "ON (...)" where appropriate
            4. get a query equivalent to the query we're trying to execute.
 
          Calls to check_interleaving_with_nj() are equivalent to writing the
          above described line from left to right. 
-         A single check_interleaving_with_nj(A,B) call is equivalent to writing 
-         table B and appropriate brackets on condition that table A and
-         appropriate brackets is the last what was written. Graphically the
-         transition is as follows:
+
+         A single check_interleaving_with_nj(A,B) call is equivalent
+         to writing table B and appropriate brackets on condition that
+         table A and appropriate brackets is the last what was
+         written. Graphically the transition is as follows:
 
                               +---- current position
                               |
@@ -18671,6 +18736,7 @@ bool Create_tmp_table::finalize(THD *thd,
   if (table->file->set_ha_share_ref(&share->ha_share))
   {
     delete table->file;
+    table->file= 0;
     goto err;
   }
   table->file->set_table(table);
@@ -19909,11 +19975,14 @@ free_tmp_table(THD *thd, TABLE *entry)
 
   if (entry->file && entry->is_created())
   {
-    DBUG_ASSERT(entry->db_stat);
-    entry->file->ha_index_or_rnd_end();
-    entry->file->info(HA_STATUS_VARIABLE);
-    thd->tmp_tables_size+= (entry->file->stats.data_file_length +
-                            entry->file->stats.index_file_length);
+    if (entry->db_stat)
+    {
+      /* The table was properly opened in open_tmp_table() */
+      entry->file->ha_index_or_rnd_end();
+      entry->file->info(HA_STATUS_VARIABLE);
+      thd->tmp_tables_size+= (entry->file->stats.data_file_length +
+                              entry->file->stats.index_file_length);
+    }
     entry->file->ha_drop_table(entry->s->path.str);
     delete entry->file;
   }
@@ -21893,8 +21962,8 @@ end_send(JOIN *join, JOIN_TAB *join_tab __attribute__((unused)),
 
 /*
   @brief
-    Perform a GROUP BY operation over a stream of rows ordered by their group. The 
-    result is sent into join->result.
+    Perform a GROUP BY operation over a stream of rows ordered by their group.
+    The result is sent into join->result.
 
   @detail
     Also applies HAVING, etc.
@@ -22174,7 +22243,9 @@ end:
 }
 
 
-/** Like end_update, but this is done with unique constraints instead of keys.  */
+/**
+   Like end_update, but this is done with unique constraints instead of keys.
+*/
 
 static enum_nested_loop_state
 end_unique_update(JOIN *join, JOIN_TAB *join_tab __attribute__((unused)),
@@ -24246,9 +24317,8 @@ cmp_buffer_with_ref(THD *thd, TABLE *table, TABLE_REF *tab_ref)
 bool
 cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref)
 {
-  enum enum_check_fields save_count_cuted_fields= thd->count_cuted_fields;
-  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-  my_bitmap_map *old_map= dbug_tmp_use_all_columns(table, table->write_set);
+  Check_level_instant_set check_level_save(thd, CHECK_FIELD_IGNORE);
+  MY_BITMAP *old_map= dbug_tmp_use_all_columns(table, &table->write_set);
   bool result= 0;
 
   for (store_key **copy=ref->key_copy ; *copy ; copy++)
@@ -24259,8 +24329,7 @@ cp_buffer_from_ref(THD *thd, TABLE *table, TABLE_REF *ref)
       break;
     }
   }
-  thd->count_cuted_fields= save_count_cuted_fields;
-  dbug_tmp_restore_column_map(table->write_set, old_map);
+  dbug_tmp_restore_column_map(&table->write_set, old_map);
   return result;
 }
 
@@ -25932,7 +26001,7 @@ bool JOIN::rollup_init()
   {
     if (!(rollup.null_items[i]= new (thd->mem_root) Item_null_result(thd)))
       return true;
-    
+
     List<Item> *rollup_fields= &rollup.fields[i];
     rollup_fields->empty();
     rollup.ref_pointer_arrays[i]= Ref_ptr_array(ref_array, all_fields.elements);
@@ -26445,7 +26514,7 @@ bool JOIN_TAB::save_explain_data(Explain_table_access *eta,
   {
     JOIN_TAB *ctab= bush_children->start;
     /* table */
-    size_t len= my_snprintf(table_name_buffer, 
+    size_t len= my_snprintf(table_name_buffer,
                          sizeof(table_name_buffer)-1,
                          "<subquery%d>", 
                          ctab->emb_sj_nest->sj_subq_pred->get_identifier());
@@ -27588,7 +27657,7 @@ void TABLE_LIST::print(THD *thd, table_map eliminated_tables, String *str,
 void st_select_lex::print(THD *thd, String *str, enum_query_type query_type)
 {
   DBUG_ASSERT(thd);
-  
+
   if (tvc)
   {
     tvc->print(thd, str, query_type);
@@ -27984,10 +28053,10 @@ JOIN::reoptimize(Item *added_where, table_map join_tables,
   if (save_to)
   {
     DBUG_ASSERT(!keyuse.elements);
-    memcpy(keyuse.buffer,
-           save_to->keyuse.buffer,
-           (size_t) save_to->keyuse.elements * keyuse.size_of_element);
     keyuse.elements= save_to->keyuse.elements;
+    if (size_t e= keyuse.elements)
+      memcpy(keyuse.buffer,
+             save_to->keyuse.buffer, e * keyuse.size_of_element);
   }
 
   /* Add the new access methods to the keyuse array. */
@@ -29048,46 +29117,6 @@ void JOIN_TAB::partial_cleanup()
   filesort_result= NULL;
   free_cache(&read_record);
 }
-
-
-/**
-  @brief
-    Look for provision of the select_handler interface by a foreign engine
-
-  @param thd   The thread handler
-
-  @details
-    The function checks that this is an upper level select and if so looks
-    through its tables searching for one whose handlerton owns a
-    create_select call-back function. If the call of this function returns
-    a select_handler interface object then the server will push the select
-    query into this engine.
-    This is a responsibility of the create_select call-back function to
-    check whether the engine can execute the query.
-
-  @retval the found select_handler if the search is successful
-          0  otherwise
-*/
-
-select_handler *SELECT_LEX::find_select_handler(THD *thd)
-{
-  if (next_select())
-      return 0;
-  if (master_unit()->outer_select())
-    return 0;
-  for (TABLE_LIST *tbl= join->tables_list; tbl; tbl= tbl->next_global)
-  {
-    if (!tbl->table)
-      continue;
-    handlerton *ht= tbl->table->file->partition_ht();
-    if (!ht->create_select)
-      continue;
-    select_handler *sh= ht->create_select(thd, this);
-    return sh;
-  }
-  return 0;
-}
-
 
 /**
   @brief

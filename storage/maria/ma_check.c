@@ -2359,6 +2359,16 @@ static int initialize_variables_for_repair(HA_CHECK *param,
                                            MARIA_SHARE *org_share)
 {
   MARIA_SHARE *share= info->s;
+  size_t tmp;
+  uint threads;
+
+  /*
+    We have to clear these variables first, as the cleanup-in-case-of-error
+    handling may touch these.
+  */
+  bzero((char*) sort_info,  sizeof(*sort_info));
+  bzero((char*) sort_param, sizeof(*sort_param));
+  bzero(&info->rec_cache, sizeof(info->rec_cache));
 
   if (share->data_file_type == NO_RECORD)
   {
@@ -2373,9 +2383,6 @@ static int initialize_variables_for_repair(HA_CHECK *param,
   /* Repair code relies on share->state.state so we have to update it here */
   if (share->lock.update_status)
     (*share->lock.update_status)(info->lock.status_param);
-
-  bzero((char*) sort_info,  sizeof(*sort_info));
-  bzero((char*) sort_param, sizeof(*sort_param));
 
   param->testflag|= T_REP;                     /* for easy checking */
   if (share->options & (HA_OPTION_CHECKSUM | HA_OPTION_COMPRESS_RECORD))
@@ -2404,7 +2411,6 @@ static int initialize_variables_for_repair(HA_CHECK *param,
   set_data_file_type(sort_info, info->s);
   sort_info->org_data_file_type= share->data_file_type;
 
-  bzero(&info->rec_cache, sizeof(info->rec_cache));
   info->rec_cache.file= info->dfile.file;
   info->update= (short) (HA_STATE_CHANGED | HA_STATE_ROW_CHANGED);
 
@@ -2415,6 +2421,7 @@ static int initialize_variables_for_repair(HA_CHECK *param,
 
   /* calculate max_records */
   sort_info->filelength= my_seek(info->dfile.file, 0L, MY_SEEK_END, MYF(0));
+
   param->max_progress= sort_info->filelength;
   if ((param->testflag & T_CREATE_MISSING_KEYS) ||
       sort_info->org_data_file_type == COMPRESSED_RECORD)
@@ -2426,6 +2433,19 @@ static int initialize_variables_for_repair(HA_CHECK *param,
                     share->base.min_block_length);
     sort_info->max_records= (ha_rows) (sort_info->filelength / rec_length);
   }
+
+  /* We don't need a bigger sort buffer than file_length * 8 */
+  threads= (param->testflag & T_REP_PARALLEL) ? (uint) share->base.keys : 1;
+  tmp= (size_t) MY_MIN(sort_info->filelength,
+                       (my_off_t) (SIZE_T_MAX/10/threads));
+  tmp= MY_MAX(tmp * 8 * threads, (size_t) 65536);         /* Some margin */
+  set_if_smaller(param->sort_buffer_length, tmp);
+  /* Protect against too big sort buffer length */
+#if SIZEOF_SIZE_T >= 8
+  set_if_smaller(param->sort_buffer_length, 16LL*1024LL*1024LL*1024LL);
+#else
+  set_if_smaller(param->sort_buffer_length, 1L*1024L*1024L*1024L);
+#endif
 
   /* Set up transaction handler so that we can see all rows */
   if (param->max_trid == 0)
@@ -2891,9 +2911,13 @@ err:
   _ma_reset_state(info);
 
   end_io_cache(&param->read_cache);
-  end_io_cache(&sort_info.new_info->rec_cache);
+  if (sort_info.new_info)
+  {
+    end_io_cache(&sort_info.new_info->rec_cache);
+    sort_info.new_info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
+  }
   info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
-  sort_info.new_info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
+
   sort_param.sort_info->info->in_check_table= 0;
   /* this below could fail, shouldn't we detect error? */
   if (got_error)
@@ -4110,10 +4134,13 @@ err:
     maria_scan_end(sort_info.info);
   _ma_reset_state(info);
 
-  end_io_cache(&sort_info.new_info->rec_cache);
+  if (sort_info.new_info)
+  {
+    end_io_cache(&sort_info.new_info->rec_cache);
+    sort_info.new_info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
+  }
   end_io_cache(&param->read_cache);
   info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
-  sort_info.new_info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
   if (got_error)
   {
     if (! param->error_printed)
@@ -4642,10 +4669,13 @@ err:
     the share by remove_io_thread() or it was not yet started (if the
     error happend before creating the thread).
   */
-  end_io_cache(&sort_info.new_info->rec_cache);
+  if (sort_info.new_info)
+  {
+    end_io_cache(&sort_info.new_info->rec_cache);
+    sort_info.new_info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
+  }
   end_io_cache(&param->read_cache);
   info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
-  sort_info.new_info->opt_flag&= ~(READ_CACHE_USED | WRITE_CACHE_USED);
   /*
     Destroy the new data cache in case of non-quick repair. All slave
     threads did either detach from the share by remove_io_thread()

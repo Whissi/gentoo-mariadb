@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2020, MariaDB Corporation.
+Copyright (c) 2017, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -76,13 +76,12 @@ uncompressed and compressed data), which must be clean. */
 /* @{ */
 
 /** Number of intervals for which we keep the history of these stats.
-Each interval is 1 second, defined by the rate at which
-srv_error_monitor_thread() calls buf_LRU_stat_update(). */
-static const ulint BUF_LRU_STAT_N_INTERVAL = 50;
+Updated at SRV_MONITOR_INTERVAL (the buf_LRU_stat_update() call rate). */
+static constexpr ulint BUF_LRU_STAT_N_INTERVAL= 4;
 
 /** Co-efficient with which we multiply I/O operations to equate them
 with page_zip_decompress() operations. */
-static const ulint BUF_LRU_IO_TO_UNZIP_FACTOR = 50;
+static constexpr ulint BUF_LRU_IO_TO_UNZIP_FACTOR= 50;
 
 /** Sampled values buf_LRU_stat_cur.
 Not protected by any mutex.  Updated by buf_LRU_stat_update(). */
@@ -411,7 +410,6 @@ buf_block_t* buf_LRU_get_free_block(bool have_mutex)
 		mysql_mutex_assert_owner(&buf_pool.mutex);
 		goto got_mutex;
 	}
-loop:
 	mysql_mutex_lock(&buf_pool.mutex);
 got_mutex:
 	buf_LRU_check_size_of_non_data_objects();
@@ -494,11 +492,10 @@ not_found:
 		++flush_failures;
 	}
 
-	srv_stats.buf_pool_wait_free.inc();
-
 	n_iterations++;
-
-	goto loop;
+	mysql_mutex_lock(&buf_pool.mutex);
+	buf_pool.stat.LRU_waits++;
+	goto got_mutex;
 }
 
 /** Move the LRU_old pointer so that the length of the old blocks list

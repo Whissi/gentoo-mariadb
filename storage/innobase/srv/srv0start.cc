@@ -3,7 +3,7 @@
 Copyright (c) 1996, 2017, Oracle and/or its affiliates. All rights reserved.
 Copyright (c) 2008, Google Inc.
 Copyright (c) 2009, Percona Inc.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 Portions of this file contain modifications contributed and copyrighted by
 Google, Inc. Those modifications are gratefully acknowledged and are described
@@ -111,7 +111,7 @@ lsn_t	srv_shutdown_lsn;
 ibool	srv_start_raw_disk_in_use;
 
 /** Number of IO threads to use */
-ulint	srv_n_file_io_threads;
+uint	srv_n_file_io_threads;
 
 /** UNDO tablespaces starts with space id. */
 ulint	srv_undo_space_id_start;
@@ -341,7 +341,7 @@ static dberr_t create_log_file(bool create_new_db, lsn_t lsn,
 @param[in,out]	logfile0	name of the first log file
 @return	error code
 @retval	DB_SUCCESS	on successful operation */
-MY_ATTRIBUTE((warn_unused_result, nonnull))
+MY_ATTRIBUTE((warn_unused_result))
 static dberr_t create_log_file_rename(lsn_t lsn, std::string &logfile0)
 {
   ut_ad(!srv_log_file_created);
@@ -1192,9 +1192,7 @@ dberr_t srv_start(bool create_new_db)
 		return(srv_init_abort(err));
 	}
 
-	srv_n_file_io_threads = srv_n_read_io_threads;
-
-	srv_n_file_io_threads += srv_n_write_io_threads;
+	srv_n_file_io_threads = srv_n_read_io_threads + srv_n_write_io_threads;
 
 	if (!srv_read_only_mode) {
 		/* Add the log and ibuf IO threads. */
@@ -1206,14 +1204,17 @@ dberr_t srv_start(bool create_new_db)
 
 	ut_a(srv_n_file_io_threads <= SRV_MAX_N_IO_THREADS);
 
-	if (!os_aio_init(srv_n_read_io_threads,
-			 srv_n_write_io_threads,
-			 SRV_MAX_N_PENDING_SYNC_IOS)) {
-
+	if (os_aio_init()) {
 		ib::error() << "Cannot initialize AIO sub-system";
 
 		return(srv_init_abort(DB_ERROR));
 	}
+
+#ifdef LINUX_NATIVE_AIO
+	if (srv_use_native_aio) {
+		ib::info() << "Using Linux native AIO";
+	}
+#endif
 
 	fil_system.create(srv_file_per_table ? 50000 : 5000);
 
@@ -1826,8 +1827,8 @@ file_checked:
 
 		DBUG_EXECUTE_IF("innodb_skip_monitors", goto skip_monitors;);
 		/* Create the task which warns of long semaphore waits */
-		srv_start_periodic_timer(srv_error_monitor_timer, srv_error_monitor_task, 1000);
-		srv_start_periodic_timer(srv_monitor_timer, srv_monitor_task, 5000);
+		srv_start_periodic_timer(srv_monitor_timer, srv_monitor_task,
+					 SRV_MONITOR_INTERVAL);
 
 #ifndef DBUG_OFF
 skip_monitors:
@@ -2016,9 +2017,9 @@ void innodb_shutdown()
 		}
 		mysql_mutex_lock(&buf_pool.flush_list_mutex);
 		while (buf_page_cleaner_is_active) {
-			mysql_cond_signal(&buf_pool.do_flush_list);
-			mysql_cond_wait(&buf_pool.done_flush_list,
-					&buf_pool.flush_list_mutex);
+			pthread_cond_signal(&buf_pool.do_flush_list);
+			my_cond_wait(&buf_pool.done_flush_list,
+				     &buf_pool.flush_list_mutex.m_mutex);
 		}
 		mysql_mutex_unlock(&buf_pool.flush_list_mutex);
 		break;
@@ -2099,6 +2100,19 @@ void innodb_shutdown()
 	ut_ad(buf_pool.is_initialised() || !srv_was_started);
 	buf_pool.close();
 	sync_check_close();
+
+	srv_sys_space.shutdown();
+	if (srv_tmp_space.get_sanity_check_status()) {
+		if (fil_system.temp_space) {
+			fil_system.temp_space->close();
+		}
+		srv_tmp_space.delete_files();
+	}
+	srv_tmp_space.shutdown();
+
+#ifdef WITH_INNODB_DISALLOW_WRITES
+	os_event_destroy(srv_allow_writes_event);
+#endif /* WITH_INNODB_DISALLOW_WRITES */
 
 	if (srv_was_started && srv_print_verbose_log) {
 		ib::info() << "Shutdown completed; log sequence number "

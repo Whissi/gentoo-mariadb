@@ -1,5 +1,5 @@
 /* Copyright (c) 2000, 2017, Oracle and/or its affiliates.
-   Copyright (c) 2008, 2020, MariaDB
+   Copyright (c) 2008, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -1160,6 +1160,14 @@ static bool wsrep_tables_accessible_when_detached(const TABLE_LIST *tables)
   }
   return true;
 }
+
+static bool wsrep_command_no_result(char command)
+{
+  return (command == COM_STMT_PREPARE          ||
+          command == COM_STMT_FETCH            ||
+          command == COM_STMT_SEND_LONG_DATA   ||
+          command == COM_STMT_CLOSE);
+}
 #endif /* WITH_WSREP */
 #ifndef EMBEDDED_LIBRARY
 
@@ -1283,12 +1291,21 @@ bool do_command(THD *thd)
 #ifdef WITH_WSREP
   DEBUG_SYNC(thd, "wsrep_before_before_command");
   /*
-    Aborted by background rollbacker thread.
-    Handle error here and jump straight to out
+    If this command does not return a result, then we
+    instruct wsrep_before_command() to skip result handling.
+    This causes BF aborted transaction to roll back but keep
+    the error state until next command which is able to return
+    a result to the client.
   */
-  if (unlikely(wsrep_service_started) && wsrep_before_command(thd))
+  if (unlikely(wsrep_service_started) &&
+      wsrep_before_command(thd, wsrep_command_no_result(command)))
   {
-    thd->store_globals();
+    /*
+      Aborted by background rollbacker thread.
+      Handle error here and jump straight to out.
+      Notice that thd->store_globals() is called
+      in wsrep_before_command().
+    */
     WSREP_LOG_THD(thd, "enter found BF aborted");
     DBUG_ASSERT(!thd->mdl_context.has_locks());
     DBUG_ASSERT(!thd->get_stmt_da()->is_set());
@@ -2088,7 +2105,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
         locks.
       */
       trans_rollback_implicit(thd);
-      thd->mdl_context.release_transactional_locks();
+      thd->release_transactional_locks();
     }
 
     thd->cleanup_after_query();
@@ -2153,7 +2170,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     ulonglong options= (ulonglong) (uchar) packet[0];
     if (trans_commit_implicit(thd))
       break;
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
     if (check_global_access(thd,RELOAD_ACL))
       break;
     general_log_print(thd, command, NullS);
@@ -2188,7 +2205,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
     if (trans_commit_implicit(thd))
       break;
     close_thread_tables(thd);
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
     my_ok(thd);
     break;
   }
@@ -2235,6 +2252,7 @@ bool dispatch_command(enum enum_server_command command, THD *thd,
       break;
     general_log_print(thd, command, NullS);
     status_var_increment(thd->status_var.com_stat[SQLCOM_SHOW_STATUS]);
+    *current_global_status_var= global_status_var;
     calc_sum_of_all_status(current_global_status_var);
     if (!(uptime= (ulong) (thd->start_time - server_start_time)))
       queries_per_second1000= 0;
@@ -2413,20 +2431,12 @@ dispatch_end:
   */
   if (unlikely(wsrep_service_started))
   {
-    /*
-      BF aborted before sending response back to client
-    */
     if (thd->killed == KILL_QUERY)
     {
       WSREP_DEBUG("THD is killed at dispatch_end");
     }
     wsrep_after_command_before_result(thd);
-    if (wsrep_current_error(thd) &&
-        !(command == COM_STMT_PREPARE          ||
-          command == COM_STMT_FETCH            ||
-          command == COM_STMT_SEND_LONG_DATA   ||
-          command == COM_STMT_CLOSE
-          ))
+    if (wsrep_current_error(thd) && !wsrep_command_no_result(command))
     {
       /* todo: Pass wsrep client state current error to override */
       wsrep_override_error(thd, wsrep_current_error(thd),
@@ -3031,7 +3041,7 @@ err:
   /* Close tables and release metadata locks. */
   close_thread_tables(thd);
   DBUG_ASSERT(!thd->locked_tables_mode);
-  thd->mdl_context.release_transactional_locks();
+  thd->release_transactional_locks();
   return TRUE;
 }
 
@@ -3776,7 +3786,7 @@ mysql_execute_command(THD *thd)
       /* Commit the normal transaction if one is active. */
       bool commit_failed= trans_commit_implicit(thd);
       /* Release metadata locks acquired in this transaction. */
-      thd->mdl_context.release_transactional_locks();
+      thd->release_transactional_locks();
       if (commit_failed)
       {
         WSREP_DEBUG("implicit commit failed, MDL released: %lld",
@@ -5087,7 +5097,7 @@ mysql_execute_command(THD *thd)
       res= trans_commit_implicit(thd);
       if (thd->locked_tables_list.unlock_locked_tables(thd))
         res= 1;
-      thd->mdl_context.release_transactional_locks();
+      thd->release_transactional_locks();
       thd->variables.option_bits&= ~(OPTION_TABLE_LOCK);
       thd->reset_binlog_for_next_statement();
     }
@@ -5104,7 +5114,7 @@ mysql_execute_command(THD *thd)
     if (thd->locked_tables_list.unlock_locked_tables(thd))
       res= 1;
     /* Release transactional metadata locks. */
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
     if (res)
       goto error;
 
@@ -5620,7 +5630,7 @@ mysql_execute_command(THD *thd)
     DBUG_PRINT("info", ("Executing SQLCOM_BEGIN  thd: %p", thd));
     if (trans_begin(thd, lex->start_transaction_opt))
     {
-      thd->mdl_context.release_transactional_locks();
+      thd->release_transactional_locks();
       WSREP_DEBUG("BEGIN failed, MDL released: %lld",
                   (longlong) thd->thread_id);
       WSREP_DEBUG("stmt_da, sql_errno: %d", (thd->get_stmt_da()->is_error()) ? thd->get_stmt_da()->sql_errno() : 0);
@@ -5639,7 +5649,7 @@ mysql_execute_command(THD *thd)
                       (thd->variables.completion_type == 2 &&
                        lex->tx_release != TVL_NO));
     bool commit_failed= trans_commit(thd);
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
     if (commit_failed)
     {
       WSREP_DEBUG("COMMIT failed, MDL released: %lld",
@@ -5677,7 +5687,7 @@ mysql_execute_command(THD *thd)
                       (thd->variables.completion_type == 2 &&
                        lex->tx_release != TVL_NO));
     bool rollback_failed= trans_rollback(thd);
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
 
     if (rollback_failed)
     {
@@ -5847,6 +5857,14 @@ mysql_execute_command(THD *thd)
     break;
   }
   case SQLCOM_XA_START:
+#ifdef WITH_WSREP
+    if (WSREP(thd))
+    {
+      my_error(ER_NOT_SUPPORTED_YET, MYF(0),
+               "XA transactions with Galera replication");
+      break;
+    }
+#endif /* WITH_WSREP */
     if (trans_xa_start(thd))
       goto error;
     my_ok(thd);
@@ -5864,7 +5882,6 @@ mysql_execute_command(THD *thd)
   case SQLCOM_XA_COMMIT:
   {
     bool commit_failed= trans_xa_commit(thd);
-    thd->mdl_context.release_transactional_locks();
     if (commit_failed)
     {
       WSREP_DEBUG("XA commit failed, MDL released: %lld",
@@ -5882,7 +5899,6 @@ mysql_execute_command(THD *thd)
   case SQLCOM_XA_ROLLBACK:
   {
     bool rollback_failed= trans_xa_rollback(thd);
-    thd->mdl_context.release_transactional_locks();
     if (rollback_failed)
     {
       WSREP_DEBUG("XA rollback failed, MDL released: %lld",
@@ -6093,7 +6109,7 @@ finish:
     */
     THD_STAGE_INFO(thd, stage_rollback_implicit);
     trans_rollback_implicit(thd);
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
   }
   else if (stmt_causes_implicit_commit(thd, CF_IMPLICIT_COMMIT_END))
   {
@@ -6107,7 +6123,7 @@ finish:
       /* Commit the normal transaction if one is active. */
       trans_commit_implicit(thd);
       thd->get_stmt_da()->set_overwrite_status(false);
-      thd->mdl_context.release_transactional_locks();
+      thd->release_transactional_locks();
     }
   }
   else if (! thd->in_sub_stmt && ! thd->in_multi_stmt_transaction_mode())
@@ -6122,7 +6138,7 @@ finish:
       - If in autocommit mode, or outside a transactional context,
       automatically release metadata locks of the current statement.
     */
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
   }
   else if (! thd->in_sub_stmt)
   {
@@ -6147,7 +6163,7 @@ finish:
   {
     WSREP_DEBUG("Forcing release of transactional locks for thd: %lld",
                 (longlong) thd->thread_id);
-    thd->mdl_context.release_transactional_locks();
+    thd->release_transactional_locks();
   }
 
   /*
@@ -6895,6 +6911,9 @@ check_access(THD *thd, privilege_t want_access,
 bool check_single_table_access(THD *thd, privilege_t privilege,
                                TABLE_LIST *tables, bool no_errors)
 {
+  if (tables->derived)
+    return 0;
+
   Switch_to_definer_security_ctx backup_sctx(thd, tables);
 
   const char *db_name;
@@ -9163,10 +9182,9 @@ struct find_thread_callback_arg
 };
 
 
-my_bool find_thread_callback(THD *thd, find_thread_callback_arg *arg)
+static my_bool find_thread_callback(THD *thd, find_thread_callback_arg *arg)
 {
-  if (thd->get_command() != COM_DAEMON &&
-      arg->id == (arg->query_id ? thd->query_id : (longlong) thd->thread_id))
+  if (arg->id == (arg->query_id ? thd->query_id : (longlong) thd->thread_id))
   {
     mysql_mutex_lock(&thd->LOCK_thd_kill);    // Lock from delete
     arg->thd= thd;
@@ -9182,27 +9200,6 @@ THD *find_thread_by_id(longlong id, bool query_id)
   server_threads.iterate(find_thread_callback, &arg);
   return arg.thd;
 }
-
-#ifdef WITH_WSREP
-my_bool find_thread_with_thd_data_lock_callback(THD *thd, find_thread_callback_arg *arg)
-{
-  if (thd->get_command() != COM_DAEMON &&
-      arg->id == (arg->query_id ? thd->query_id : (longlong) thd->thread_id))
-  {
-    if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
-    mysql_mutex_lock(&thd->LOCK_thd_kill);    // Lock from delete
-    arg->thd= thd;
-    return 1;
-  }
-  return 0;
-}
-THD *find_thread_by_id_with_thd_data_lock(longlong id, bool query_id)
-{
-  find_thread_callback_arg arg(id, query_id);
-  server_threads.iterate(find_thread_with_thd_data_lock_callback, &arg);
-  return arg.thd;
-}
-#endif
 
 /**
   kill one thread.
@@ -9220,11 +9217,11 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
   uint error= (type == KILL_TYPE_QUERY ? ER_NO_SUCH_QUERY : ER_NO_SUCH_THREAD);
   DBUG_ENTER("kill_one_thread");
   DBUG_PRINT("enter", ("id: %lld  signal: %u", id, (uint) kill_signal));
-#ifdef WITH_WSREP
-  if (id && (tmp= find_thread_by_id_with_thd_data_lock(id, type == KILL_TYPE_QUERY)))
-#else
-  if (id && (tmp= find_thread_by_id(id, type == KILL_TYPE_QUERY)))
-#endif
+  tmp= find_thread_by_id(id, type == KILL_TYPE_QUERY);
+  if (!tmp)
+    DBUG_RETURN(error);
+
+  if (tmp->get_command() != COM_DAEMON)
   {
     /*
       If we're SUPER, we can KILL anything, including system-threads.
@@ -9247,6 +9244,7 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
       faster and do a harder kill than KILL_SYSTEM_THREAD;
     */
 
+    mysql_mutex_lock(&tmp->LOCK_thd_data); // for various wsrep* checks below
 #ifdef WITH_WSREP
     if (((thd->security_ctx->master_access & PRIV_KILL_OTHER_USER_PROCESS) ||
         thd->security_ctx->user_matches(tmp->security_ctx)) &&
@@ -9268,8 +9266,8 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
       else
 #endif /* WITH_WSREP */
       {
-      WSREP_DEBUG("kill_one_thread %llu, victim: %llu wsrep_aborter %llu by signal %d",
-                  thd->thread_id, id, tmp->wsrep_aborter, kill_signal);
+        WSREP_DEBUG("kill_one_thread %llu, victim: %llu wsrep_aborter %llu by signal %d",
+                    thd->thread_id, id, tmp->wsrep_aborter, kill_signal);
         tmp->awake_no_mutex(kill_signal);
         WSREP_DEBUG("victim: %llu taken care of", id);
         error= 0;
@@ -9278,11 +9276,9 @@ kill_one_thread(THD *thd, longlong id, killed_state kill_signal, killed_type typ
     else
       error= (type == KILL_TYPE_QUERY ? ER_KILL_QUERY_DENIED_ERROR :
                                         ER_KILL_DENIED_ERROR);
-#ifdef WITH_WSREP
-    if (WSREP(tmp)) mysql_mutex_unlock(&tmp->LOCK_thd_data);
-#endif
-    mysql_mutex_unlock(&tmp->LOCK_thd_kill);
+    mysql_mutex_unlock(&tmp->LOCK_thd_data);
   }
+  mysql_mutex_unlock(&tmp->LOCK_thd_kill);
   DBUG_PRINT("exit", ("%d", error));
   DBUG_RETURN(error);
 }
@@ -9329,8 +9325,8 @@ static my_bool kill_threads_callback(THD *thd, kill_threads_callback_arg *arg)
         return 1;
       if (!arg->threads_to_kill.push_back(thd, arg->thd->mem_root))
       {
-        if (WSREP(thd)) mysql_mutex_lock(&thd->LOCK_thd_data);
         mysql_mutex_lock(&thd->LOCK_thd_kill); // Lock from delete
+        mysql_mutex_lock(&thd->LOCK_thd_data);
       }
     }
   }
@@ -9373,7 +9369,7 @@ static uint kill_threads_for_user(THD *thd, LEX_USER *user,
       */
       next_ptr= it2++;
       mysql_mutex_unlock(&ptr->LOCK_thd_kill);
-      if (WSREP(ptr)) mysql_mutex_unlock(&ptr->LOCK_thd_data);
+      mysql_mutex_unlock(&ptr->LOCK_thd_data);
       (*rows)++;
     } while ((ptr= next_ptr));
   }

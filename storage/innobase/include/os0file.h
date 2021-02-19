@@ -38,6 +38,7 @@ Created 10/21/1995 Heikki Tuuri
 
 #include "fsp0types.h"
 #include "tpool.h"
+#include "my_counter.h"
 
 #ifndef _WIN32
 #include <dirent.h>
@@ -237,8 +238,7 @@ private:
   @param off   byte offset from the start (SEEK_SET)
   @param len   size of the hole in bytes
   @return DB_SUCCESS or error code */
-  dberr_t punch_hole(os_offset_t off, ulint len) const
-    MY_ATTRIBUTE((nonnull));
+  dberr_t punch_hole(os_offset_t off, ulint len) const;
 
 public:
   /** Page to be written on write operation */
@@ -265,10 +265,9 @@ struct os_file_size_t {
 	os_offset_t	m_alloc_size;
 };
 
-/** Win NT does not allow more than 64 */
-static const ulint OS_AIO_N_PENDING_IOS_PER_THREAD = 256;
+constexpr ulint OS_AIO_N_PENDING_IOS_PER_THREAD= 256;
 
-extern ulint	os_n_file_reads;
+extern Atomic_counter<ulint> os_n_file_reads;
 extern ulint	os_n_file_writes;
 extern ulint	os_n_fsyncs;
 
@@ -1137,21 +1136,9 @@ void
 unit_test_os_file_get_parent_dir();
 #endif /* UNIV_ENABLE_UNIT_TEST_GET_PARENT_DIR */
 
-/** Initializes the asynchronous io system. Creates one array each for ibuf
-and log i/o. Also creates one array each for read and write where each
-array is divided logically into n_read_segs and n_write_segs
-respectively. The caller must create an i/o handler thread for each
-segment in these arrays. This function also creates the sync array.
-No i/o handler thread needs to be created for that
-@param[in]	n_read_segs	number of reader threads
-@param[in]	n_write_segs	number of writer threads
-@param[in]	n_slots_sync	number of slots in the sync aio array */
-
-bool
-os_aio_init(
-	ulint		n_read_segs,
-	ulint		n_write_segs,
-	ulint		n_slots_sync);
+/**
+Initializes the asynchronous io system. */
+int os_aio_init();
 
 /**
 Frees the asynchronous io system. */

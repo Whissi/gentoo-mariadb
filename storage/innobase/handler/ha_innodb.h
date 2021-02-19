@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2000, 2017, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -51,12 +51,7 @@ struct ha_table_option_struct
 	uint		encryption;		/*!<  DEFAULT, ON, OFF */
 	ulonglong	encryption_key_id;	/*!< encryption key id  */
 };
-/* JAN: TODO: MySQL 5.7 handler.h */
-struct st_handler_tablename
-{
-  const char *db;
-  const char *tablename;
-};
+
 /** The class defining a handle to an Innodb table */
 class ha_innobase final : public handler
 {
@@ -215,6 +210,8 @@ public:
 	inline int defragment_table(const char* name);
 	int check(THD* thd, HA_CHECK_OPT* check_opt) override;
 	char* update_table_comment(const char* comment) override;
+
+	inline void reload_statistics();
 
 	char* get_foreign_key_create_info() override;
 
@@ -975,6 +972,3 @@ which is in the prepared state
 
 @return 0 or error number */
 int innobase_rollback_by_xid(handlerton* hton, XID* xid);
-
-/** Free tablespace resources allocated. */
-void innobase_space_shutdown();

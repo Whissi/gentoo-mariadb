@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -361,14 +361,13 @@ buf_page_release_latch(
 void buf_page_make_young(buf_page_t *bpage);
 /** Mark the page status as FREED for the given tablespace id and
 page number. If the page is not in buffer pool then ignore it.
-@param[in]	page_id	page_id
+@param[in,out]	space	tablespace
+@param[in]	page	page number
 @param[in,out]	mtr	mini-transaction
 @param[in]	file	file name
 @param[in]	line	line where called */
-void buf_page_free(const page_id_t page_id,
-                   mtr_t *mtr,
-                   const char *file,
-                   unsigned line);
+void buf_page_free(fil_space_t *space, uint32_t page, mtr_t *mtr,
+                   const char *file, unsigned line);
 
 /********************************************************************//**
 Reads the freed_page_clock of a buffer block.
@@ -592,14 +591,6 @@ inline uint buf_page_full_crc32_size(const byte* buf, bool* comp, bool* cr)
 }
 
 #ifndef UNIV_INNOCHECKSUM
-#ifdef UNIV_DEBUG
-/** Find a block in the buffer pool that points to a given compressed page.
-@param[in]	data		pointer to compressed page
-@return buffer block pointing to the compressed page
-@retval NULL if not found */
-buf_block_t* buf_pool_contains_zip(const void* data);
-#endif /* UNIV_DEBUG */
-
 /** Dump a page to stderr.
 @param[in]	read_buf	database page
 @param[in]	zip_size	compressed page size, or 0 */
@@ -948,11 +939,20 @@ public:
   /** Clear oldest_modification when removing from buf_pool.flush_list */
   inline void clear_oldest_modification();
 
+  /** Notify that a page in a temporary tablespace has been modified. */
+  void set_temp_modified()
+  {
+    ut_ad(fsp_is_system_temporary(id().space()));
+    ut_ad(state() == BUF_BLOCK_FILE_PAGE);
+    ut_ad(!oldest_modification());
+    oldest_modification_= 1;
+  }
+
   /** Prepare to release a file page to buf_pool.free. */
   void free_file_page()
   {
     ut_ad(state() == BUF_BLOCK_REMOVE_HASH);
-    ut_d(oldest_modification_= 0); /* for buf_LRU_free_page(this, false) */
+    ut_d(oldest_modification_= 0); /* for buf_LRU_block_free_non_file_page() */
     set_corrupt_id();
     ut_d(set_state(BUF_BLOCK_MEMORY));
   }
@@ -1355,6 +1355,8 @@ struct buf_pool_stat_t{
 				young because the first access
 				was not long enough ago, in
 				buf_page_peek_if_too_old() */
+	/** number of waits for eviction; writes protected by buf_pool.mutex */
+	ulint	LRU_waits;
 	ulint	LRU_bytes;	/*!< LRU size in bytes */
 	ulint	flush_list_bytes;/*!< flush_list size in bytes */
 };
@@ -1560,18 +1562,22 @@ public:
   bool is_block_lock(const rw_lock_t *l) const
   { return is_block_field(static_cast<const void*>(l)); }
 
-  /**
-  @return the smallest oldest_modification lsn for any page
-  @retval empty_lsn if all modified persistent pages have been flushed */
-  lsn_t get_oldest_modification(lsn_t empty_lsn)
+  /** @return the block that was made dirty the longest time ago */
+  const buf_page_t *get_oldest_modified() const
   {
     mysql_mutex_assert_owner(&flush_list_mutex);
     const buf_page_t *bpage= UT_LIST_GET_LAST(flush_list);
-#if 1 /* MDEV-12227 FIXME: remove this loop */
-    for (; bpage && fsp_is_system_temporary(bpage->id().space());
-         bpage= UT_LIST_GET_PREV(list, bpage))
-      ut_ad(bpage->oldest_modification());
-#endif
+    ut_ad(!bpage || !fsp_is_system_temporary(bpage->id().space()));
+    ut_ad(!bpage || bpage->oldest_modification());
+    return bpage;
+  }
+
+  /**
+  @return the smallest oldest_modification lsn for any page
+  @retval empty_lsn if all modified persistent pages have been flushed */
+  lsn_t get_oldest_modification(lsn_t empty_lsn) const
+  {
+    const buf_page_t *bpage= get_oldest_modified();
     return bpage ? bpage->oldest_modification() : empty_lsn;
   }
 
@@ -1785,15 +1791,15 @@ public:
   static constexpr uint32_t READ_AHEAD_PAGES= 64;
 
   /** Buffer pool mutex */
-  mysql_mutex_t mutex;
+  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) mysql_mutex_t mutex;
   /** Number of pending LRU flush. */
   Atomic_counter<ulint> n_flush_LRU;
   /** broadcast when n_flush_LRU reaches 0; protected by mutex */
-  mysql_cond_t done_flush_LRU;
+  pthread_cond_t done_flush_LRU;
   /** Number of pending flush_list flush. */
   Atomic_counter<ulint> n_flush_list;
   /** broadcast when n_flush_list reaches 0; protected by mutex */
-  mysql_cond_t done_flush_list;
+  pthread_cond_t done_flush_list;
 
 	/** @name General fields */
 	/* @{ */
@@ -1932,14 +1938,33 @@ public:
 
   /** mutex protecting flush_list, buf_page_t::set_oldest_modification()
   and buf_page_t::list pointers when !oldest_modification() */
-  mysql_mutex_t flush_list_mutex;
+  MY_ALIGNED(CPU_LEVEL1_DCACHE_LINESIZE) mysql_mutex_t flush_list_mutex;
   /** "hazard pointer" for flush_list scans; protected by flush_list_mutex */
   FlushHp flush_hp;
   /** modified blocks (a subset of LRU) */
   UT_LIST_BASE_NODE_T(buf_page_t) flush_list;
-
+private:
+  /** whether the page cleaner needs wakeup from indefinite sleep */
+  bool page_cleaner_is_idle;
+public:
   /** signalled to wake up the page_cleaner; protected by flush_list_mutex */
-  mysql_cond_t do_flush_list;
+  pthread_cond_t do_flush_list;
+
+  /** @return whether the page cleaner must sleep due to being idle */
+  bool page_cleaner_idle() const
+  {
+    mysql_mutex_assert_owner(&flush_list_mutex);
+    return page_cleaner_is_idle;
+  }
+  /** Wake up the page cleaner if needed */
+  inline void page_cleaner_wakeup();
+
+  /** Register whether an explicit wakeup of the page cleaner is needed */
+  void page_cleaner_set_idle(bool deep_sleep)
+  {
+    mysql_mutex_assert_owner(&flush_list_mutex);
+    page_cleaner_is_idle= deep_sleep;
+  }
 
   // n_flush_LRU + n_flush_list is approximately COUNT(io_fix()==BUF_IO_WRITE)
   // in flush_list
@@ -2142,8 +2167,17 @@ inline void buf_page_t::set_io_fix(buf_io_fix io_fix)
 
 inline void buf_page_t::set_corrupt_id()
 {
-  ut_ad(!oldest_modification());
 #ifdef UNIV_DEBUG
+  switch (oldest_modification()) {
+  case 0:
+    break;
+  case 1:
+    ut_ad(fsp_is_system_temporary(id().space()));
+    ut_d(oldest_modification_= 0); /* for buf_LRU_block_free_non_file_page() */
+    break;
+  default:
+    ut_ad("block is dirty" == 0);
+  }
   switch (state()) {
   case BUF_BLOCK_REMOVE_HASH:
     break;

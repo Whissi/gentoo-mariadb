@@ -1057,6 +1057,9 @@ class User_table_tabular: public User_table
     if (access & REPL_SLAVE_ACL)
       access|= REPL_MASTER_ADMIN_ACL;
 
+    if (access & REPL_SLAVE_ACL)
+      access|= SLAVE_MONITOR_ACL;
+
     return access & GLOBAL_ACLS;
   }
 
@@ -1528,7 +1531,11 @@ class User_table_json: public User_table
   {
     privilege_t mask= ALL_KNOWN_ACL_100304;
     ulonglong orig_access= access;
-    if (version_id >= 100502)
+    if (version_id >= 100508)
+    {
+      mask= ALL_KNOWN_ACL_100508;
+    }
+    else if (version_id >= 100502 && version_id < 100508)
     {
       mask= ALL_KNOWN_ACL_100502;
     }
@@ -1554,6 +1561,12 @@ class User_table_json: public User_table
         }
         access|= GLOBAL_SUPER_ADDED_SINCE_USER_TABLE_ACLS;
       }
+      /*
+        REPLICATION_CLIENT(BINLOG_MONITOR_ACL) should allow SHOW SLAVE STATUS
+        REPLICATION SLAVE should allow SHOW RELAYLOG EVENTS
+      */
+      if (access & BINLOG_MONITOR_ACL || access & REPL_SLAVE_ACL)
+        access|= SLAVE_MONITOR_ACL;
     }
 
     if (orig_access & ~mask)
@@ -3272,6 +3285,12 @@ end:
 
 int acl_check_setrole(THD *thd, const char *rolename, privilege_t *access)
 {
+  if (!initialized)
+  {
+    my_error(ER_OPTION_PREVENTS_STATEMENT, MYF(0), "--skip-grant-tables");
+    return 1;
+  }
+
   return check_user_can_set_role(thd, thd->security_ctx->priv_user,
            thd->security_ctx->host, thd->security_ctx->ip, rolename, access);
 }
@@ -8974,7 +8993,7 @@ static const char *command_array[]=
   "CREATE USER", "EVENT", "TRIGGER", "CREATE TABLESPACE", "DELETE HISTORY",
   "SET USER", "FEDERATED ADMIN", "CONNECTION ADMIN", "READ_ONLY ADMIN",
   "REPLICATION SLAVE ADMIN", "REPLICATION MASTER ADMIN", "BINLOG ADMIN",
-  "BINLOG REPLAY"
+  "BINLOG REPLAY", "SLAVE MONITOR"
 };
 
 static uint command_lengths[]=
@@ -8987,7 +9006,7 @@ static uint command_lengths[]=
   11, 5, 7, 17, 14,
   8, 15, 16, 15,
   23, 24, 12,
-  13
+  13, 13
 };
 
 
@@ -9087,6 +9106,9 @@ bool mysql_show_create_user(THD *thd, LEX_USER *lex_user)
   append_identifier(thd, &result, username, strlen(username));
   add_user_parameters(thd, &result, acl_user, false);
 
+  if (acl_user->account_locked)
+    result.append(STRING_WITH_LEN(" ACCOUNT LOCK"));
+
   if (acl_user->password_expired)
     result.append(STRING_WITH_LEN(" PASSWORD EXPIRE"));
   else if (!acl_user->password_lifetime)
@@ -9097,9 +9119,6 @@ bool mysql_show_create_user(THD *thd, LEX_USER *lex_user)
     result.append_longlong(acl_user->password_lifetime);
     result.append(STRING_WITH_LEN(" DAY"));
   }
-
-  if (acl_user->account_locked)
-    result.append(STRING_WITH_LEN(" ACCOUNT LOCK"));
 
   protocol->prepare_for_resend();
   protocol->store(result.ptr(), result.length(), result.charset());
@@ -9450,6 +9469,8 @@ static bool show_global_privileges(THD *thd, ACL_USER_BASE *acl_entry,
     add_user_parameters(thd, &global, (ACL_USER *)acl_entry,
                         (want_access & GRANT_ACL));
 
+  else if (want_access & GRANT_ACL)
+    global.append(STRING_WITH_LEN(" WITH GRANT OPTION"));
   protocol->prepare_for_resend();
   protocol->store(global.ptr(),global.length(),global.charset());
   if (protocol->write())
@@ -13186,15 +13207,6 @@ static bool find_mpvio_user(MPVIO_EXT *mpvio)
 
   ACL_USER *user= find_user_or_anon(sctx->host, sctx->user, sctx->ip);
 
-  if (user && user->password_errors >= max_password_errors && !ignore_max_password_errors(user))
-  {
-    mysql_mutex_unlock(&acl_cache->lock);
-    my_error(ER_USER_IS_BLOCKED, MYF(0));
-    general_log_print(mpvio->auth_info.thd, COM_CONNECT,
-      ER_THD(mpvio->auth_info.thd, ER_USER_IS_BLOCKED));
-    DBUG_RETURN(1);
-  }
-
   if (user)
     mpvio->acl_user= user->copy(mpvio->auth_info.thd->mem_root);
 
@@ -13229,6 +13241,15 @@ static bool find_mpvio_user(MPVIO_EXT *mpvio)
     mysql_mutex_unlock(&acl_cache->lock);
 
     mpvio->make_it_fail= true;
+  }
+
+  if (mpvio->acl_user->password_errors >= max_password_errors &&
+      !ignore_max_password_errors(mpvio->acl_user))
+  {
+    my_error(ER_USER_IS_BLOCKED, MYF(0));
+    general_log_print(mpvio->auth_info.thd, COM_CONNECT,
+      ER_THD(mpvio->auth_info.thd, ER_USER_IS_BLOCKED));
+    DBUG_RETURN(1);
   }
 
   /* user account requires non-default plugin and the client is too old */
@@ -14536,7 +14557,7 @@ static int native_password_authenticate(MYSQL_PLUGIN_VIO *vio,
   info->password_used= PASSWORD_USED_YES;
   if (pkt_len == SCRAMBLE_LENGTH)
   {
-    if (!info->auth_string_length)
+    if (info->auth_string_length != SCRAMBLE_LENGTH)
       DBUG_RETURN(CR_AUTH_USER_CREDENTIALS);
 
     if (check_scramble(pkt, thd->scramble, (uchar*)info->auth_string))
@@ -14563,10 +14584,15 @@ static int native_password_make_scramble(const char *password,
   return 0;
 }
 
+/* As this contains is a string of not a valid SCRAMBLE_LENGTH */
+static const char invalid_password[] = "*THISISNOTAVALIDPASSWORDTHATCANBEUSEDHERE";
+
 static int native_password_get_salt(const char *hash, size_t hash_length,
                                     unsigned char *out, size_t *out_length)
 {
+  DBUG_ASSERT(sizeof(invalid_password) > SCRAMBLE_LENGTH);
   DBUG_ASSERT(*out_length >= SCRAMBLE_LENGTH);
+  DBUG_ASSERT(*out_length >= sizeof(invalid_password));
   if (hash_length == 0)
   {
     *out_length= 0;
@@ -14575,8 +14601,27 @@ static int native_password_get_salt(const char *hash, size_t hash_length,
 
   if (hash_length != SCRAMBLED_PASSWORD_CHAR_LENGTH)
   {
+    if (hash_length == 7 && strcmp(hash, "invalid") == 0)
+    {
+      memcpy(out, invalid_password, sizeof(invalid_password));
+      *out_length= sizeof(invalid_password);
+      return 0;
+    }
     my_error(ER_PASSWD_LENGTH, MYF(0), SCRAMBLED_PASSWORD_CHAR_LENGTH);
     return 1;
+  }
+
+  for (const char *c= hash + 1; c < (hash + hash_length); c++)
+  {
+    /* If any non-hex characters are found, mark the password as invalid. */
+    if (!(*c >= '0' && *c <= '9') &&
+        !(*c >= 'A' && *c <= 'F') &&
+        !(*c >= 'a' && *c <= 'f'))
+    {
+      memcpy(out, invalid_password, sizeof(invalid_password));
+      *out_length= sizeof(invalid_password);
+      return 0;
+    }
   }
 
   *out_length= SCRAMBLE_LENGTH;

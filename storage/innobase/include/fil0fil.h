@@ -520,8 +520,9 @@ private:
   }
 public:
   MY_ATTRIBUTE((warn_unused_result))
-  /** @return whether a tablespace reference was successfully acquired */
-  inline bool acquire_if_not_stopped(bool have_mutex= false);
+  /** Acquire a tablespace reference.
+  @return whether a tablespace reference was successfully acquired */
+  inline bool acquire_if_not_stopped();
 
   MY_ATTRIBUTE((warn_unused_result))
   /** Acquire a tablespace reference for I/O.
@@ -972,7 +973,7 @@ public:
   fil_io_t io(const IORequest &type, os_offset_t offset, size_t len,
               void *buf, buf_page_t *bpage= nullptr);
   /** Flush pending writes from the file system cache to the file. */
-  inline void flush();
+  template<bool have_reference> inline void flush();
   /** Flush pending writes from the file system cache to the file. */
   void flush_low();
 
@@ -1434,15 +1435,6 @@ inline void fil_space_t::reacquire()
   ut_ad(UT_LIST_GET_FIRST(chain)->is_open());
 }
 
-inline bool fil_space_t::acquire_if_not_stopped(bool have_mutex)
-{
-  ut_ad(mutex_own(&fil_system.mutex) == have_mutex);
-  const uint32_t n= acquire_low();
-  if (UNIV_LIKELY(!(n & (STOPPING | CLOSING))))
-    return true;
-  return UNIV_LIKELY(!(n & CLOSING)) || prepare(have_mutex);
-}
-
 /** Note that operations on the tablespace must stop or can resume */
 inline void fil_space_t::set_stopping(bool stopping)
 {
@@ -1452,18 +1444,23 @@ inline void fil_space_t::set_stopping(bool stopping)
 }
 
 /** Flush pending writes from the file system cache to the file. */
-inline void fil_space_t::flush()
+template<bool have_reference> inline void fil_space_t::flush()
 {
   ut_ad(!mutex_own(&fil_system.mutex));
-
+  ut_ad(!have_reference || (pending() & PENDING));
   ut_ad(purpose == FIL_TYPE_TABLESPACE || purpose == FIL_TYPE_IMPORT);
   if (srv_file_flush_method == SRV_O_DIRECT_NO_FSYNC)
   {
     ut_ad(!is_in_unflushed_spaces);
     ut_ad(!needs_flush());
   }
-  else
+  else if (have_reference)
     flush_low();
+  else if (!(acquire_low() & STOPPING))
+  {
+    flush_low();
+    release();
+  }
 }
 
 /** @return the size in pages (0 if unreadable) */

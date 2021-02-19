@@ -1,4 +1,5 @@
 /* Copyright (C) 2014 InfiniDB, Inc.
+   Copyright (c) 2016-2020 MariaDB
 
    This program is free software; you can redistribute it and/or
    modify it under the terms of the GNU General Public License
@@ -43,6 +44,7 @@ using namespace std;
 #include "tupleaggregatestep.h"
 #include "errorids.h"
 #include "diskjoinstep.h"
+#include "vlarray.h"
 
 using namespace execplan;
 using namespace joiner;
@@ -294,7 +296,7 @@ void TupleHashJoinStep::startSmallRunners(uint index)
     */
 
     stopMemTracking = false;
-    uint64_t jobs[numCores];
+    utils::VLArray<uint64_t> jobs(numCores);
     uint64_t memMonitor = jobstepThreadPool.invoke([this, index] { this->trackMem(index); });
     // starting 1 thread when in PM mode, since it's only inserting into a
     // vector of rows.  The rest will be started when converted to UM mode.
@@ -447,23 +449,12 @@ next:
             dlMutex.unlock();
         }
     }
-    catch (boost::exception& e)
-    {
-        ostringstream oss;
-        oss << "TupleHashJoinStep::smallRunnerFcn failed due to " << boost::diagnostic_information(e);
-        fLogger->logMessage(logging::LOG_TYPE_ERROR, oss.str());
-        status(logging::ERR_EXEMGR_MALFUNCTION);
-    }
-    catch (std::exception& e)
-    {
-        ostringstream oss;
-        oss << "TupleHashJoinStep::smallRunnerFcn failed due to " << e.what();
-        fLogger->logMessage(logging::LOG_TYPE_ERROR, oss.str());
-        status(logging::ERR_EXEMGR_MALFUNCTION);
-    }
     catch (...)
     {
-        fLogger->logMessage(logging::LOG_TYPE_ERROR, "TupleHashJoinStep::smallRunnerFcn failed due to an unknown reason (...)");
+        handleException(std::current_exception(),
+                        logging::ERR_EXEMGR_MALFUNCTION,
+                        logging::ERR_JOIN_TOO_BIG,
+                        "TupleHashJoinStep::smallRunnerFcn()");
         status(logging::ERR_EXEMGR_MALFUNCTION);
     }
 
@@ -755,28 +746,13 @@ void TupleHashJoinStep::hjRunner()
                 rgData[djsJoinerMap[i]].swap(empty);
             }
         }
-        catch (logging::IDBExcept& e)
+        catch (...)
         {
-            cout << e.what() << endl;
-
-            if (!status())
-            {
-                errorMessage(logging::IDBErrorInfo::instance()->errorMsg(e.errorCode()));
-                status(e.errorCode());
-            }
-
-            abort();
-        }
-        catch (std::exception& e)
-        {
-            cout << e.what() << endl;
-
-            if (!status())
-            {
-                errorMessage(logging::IDBErrorInfo::instance()->errorMsg(logging::ERR_DBJ_UNKNOWN_ERROR));
-                status(logging::ERR_DBJ_UNKNOWN_ERROR);
-            }
-
+            handleException(std::current_exception(),
+                            logging::ERR_EXEMGR_MALFUNCTION,
+                            logging::ERR_JOIN_TOO_BIG,
+                            "TupleHashJoinStep::hjRunner()");
+            status(logging::ERR_EXEMGR_MALFUNCTION);
             abort();
         }
 

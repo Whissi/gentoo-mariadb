@@ -57,13 +57,7 @@ static bool make_empty_rec(THD *, uchar *, uint, List<Create_field> &, uint,
 */
 static uchar *extra2_write_len(uchar *pos, size_t len)
 {
-  /* TODO: should be
-     if (len > 0 && len <= 255)
-       *pos++= (uchar)len;
-     ...
-     because extra2_read_len() uses 0 for 2-byte lengths.
-     extra2_str_size() must be fixed too.
-  */
+  DBUG_ASSERT(len);
   if (len <= 255)
     *pos++= (uchar)len;
   else
@@ -1104,8 +1098,11 @@ static bool pack_fields(uchar **buff_arg, List<Create_field> &create_fields,
     it.rewind();
     while ((field=it++))
     {
-      memcpy(buff, field->comment.str, field->comment.length);
-      buff+= field->comment.length;
+      if (size_t l= field->comment.length)
+      {
+        memcpy(buff, field->comment.str, l);
+        buff+= l;
+      }
     }
   }
   *buff_arg= buff;
@@ -1148,7 +1145,8 @@ static bool make_empty_rec(THD *thd, uchar *buff, uint table_options,
   TABLE table;
   TABLE_SHARE share;
   Create_field *field;
-  enum_check_fields old_count_cuted_fields= thd->count_cuted_fields;
+  Check_level_instant_set old_count_cuted_fields(thd, CHECK_FIELD_WARN);
+  Abort_on_warning_instant_set old_abort_on_warning(thd, 0);
   DBUG_ENTER("make_empty_rec");
 
   /* We need a table to generate columns for default values */
@@ -1167,7 +1165,6 @@ static bool make_empty_rec(THD *thd, uchar *buff, uint table_options,
   null_pos= buff;
 
   List_iterator<Create_field> it(create_fields);
-  thd->count_cuted_fields= CHECK_FIELD_WARN;    // To find wrong default values
   while ((field=it++))
   {
     Record_addr addr(buff + field->offset + data_offset,
@@ -1214,6 +1211,5 @@ static bool make_empty_rec(THD *thd, uchar *buff, uint table_options,
     *(null_pos + null_count / 8)|= ~(((uchar) 1 << (null_count & 7)) - 1);
 
 err:
-  thd->count_cuted_fields= old_count_cuted_fields;
   DBUG_RETURN(error);
 } /* make_empty_rec */

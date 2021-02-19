@@ -45,7 +45,6 @@ typedef int pthread_t;
 
 using namespace std;
 
-#include <boost/timer.hpp>
 #include <boost/scoped_ptr.hpp>
 #include <boost/scoped_array.hpp>
 #include <boost/thread.hpp>
@@ -1805,12 +1804,15 @@ public:
 private:
     void createEqualityFilter()
     {
-        uint32_t uniqueID, count, i;
+        uint32_t uniqueID, count, i, charsetNumber;
         string str;
-        boost::shared_ptr<DictEqualityFilter> filter(new DictEqualityFilter());
-
         bs->advance(sizeof(ISMPacketHeader));
         *bs >> uniqueID;
+        *bs >> charsetNumber;
+
+        datatypes::Charset cs(charsetNumber);
+        boost::shared_ptr<DictEqualityFilter> filter(new DictEqualityFilter(cs));
+
         *bs >> count;
 
         for (i = 0; i < count; i++)
@@ -2493,7 +2495,7 @@ PrimitiveServer::~PrimitiveServer()
 {
 }
 
-void PrimitiveServer::start()
+void PrimitiveServer::start(Service *service)
 {
     // start all the server threads
     for ( int i = 1; i <= fServerThreads; i++)
@@ -2505,15 +2507,7 @@ void PrimitiveServer::start()
         fServerpool.invoke(ServerThread(oss.str(), this));
     }
 
-    {
-        Oam oam;
-
-        try
-        {
-            oam.processInitComplete("PrimProc");
-        }
-        catch (...) {}
-    }
+    service->NotifyServiceStarted();
 
     fServerpool.wait();
 

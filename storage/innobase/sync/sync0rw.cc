@@ -990,7 +990,7 @@ the pass value == 0.
 bool
 rw_lock_own(
 /*========*/
-	rw_lock_t*	lock,		/*!< in: rw-lock */
+	const rw_lock_t*lock,		/*!< in: rw-lock */
 	ulint		lock_type)	/*!< in: lock type: RW_LOCK_S,
 					RW_LOCK_X */
 {
@@ -1144,10 +1144,10 @@ rw_lock_debug_print(
 {
 	ulint	rwt = info->lock_type;
 
-	fprintf(f, "Locked: thread %lu file %s line %lu  ",
-		static_cast<ulong>(os_thread_pf(info->thread_id)),
+	fprintf(f, "Locked: thread " ULINTPF " file %s line %u  ",
+		ulint(info->thread_id),
 		sync_basename(info->file_name),
-		static_cast<ulong>(info->line));
+		info->line);
 
 	switch (rwt) {
 	case RW_LOCK_S:
@@ -1187,7 +1187,7 @@ rw_lock_t::to_string() const
 	ut_ad(rw_lock_validate(this));
 
 	msg << "RW-LATCH: "
-	    << "thread id " << os_thread_pf(os_thread_get_curr_id())
+	    << "thread id " << os_thread_get_curr_id()
 	    << " addr: " << this
 	    << " Locked from: ";
 

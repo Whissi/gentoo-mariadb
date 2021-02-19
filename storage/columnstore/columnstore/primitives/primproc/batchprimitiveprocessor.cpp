@@ -53,6 +53,7 @@ using namespace boost;
 #include "blockcacheclient.h"
 #include "MonitorProcMem.h"
 #include "threadnaming.h"
+#include "vlarray.h"
 
 #define MAX64 0x7fffffffffffffffLL
 #define MIN64 0x8000000000000000LL
@@ -343,7 +344,11 @@ void BatchPrimitiveProcessor::initBPP(ByteStream& bs)
                     bs >> tlKeyLengths[i];
                     //storedKeyAllocators[i] = PoolAllocator();
                     for (uint j = 0; j < processorThreads; ++j)
-                        tlJoiners[i][j].reset(new TLJoiner(10, TupleJoiner::hasher()));
+                        tlJoiners[i][j].reset(new TLJoiner(10,
+                                                           TupleJoiner::TypelessDataHasher(&outputRG,
+                                                                               &tlLargeSideKeyColumns[i]),
+                                                           TupleJoiner::TypelessDataComparator(&outputRG,
+                                                                                   &tlLargeSideKeyColumns[i])));
                 }
             }
 
@@ -589,7 +594,7 @@ void BatchPrimitiveProcessor::addToJoiner(ByteStream& bs)
         // properly-named functions for clarity.
         if (typelessJoin[joinerNum])
         {
-            vector<pair<TypelessData, uint32_t> > tmpBuckets[processorThreads];
+            utils::VLArray<vector<pair<TypelessData, uint32_t> > > tmpBuckets(processorThreads);
             TypelessData tlLargeKey;
             uint8_t nullFlag;
             PoolAllocator &storedKeyAllocator = storedKeyAllocators[joinerNum];
@@ -602,7 +607,7 @@ void BatchPrimitiveProcessor::addToJoiner(ByteStream& bs)
                 {
                     tlLargeKey.deserialize(bs, storedKeyAllocator);
                     bs >> tlIndex;
-                    bucket = bucketPicker((char *) tlLargeKey.data, tlLargeKey.len, bpSeed) & ptMask;
+                    bucket = tlLargeKey.hash(outputRG, tlLargeSideKeyColumns[joinerNum]) & ptMask;
                     tmpBuckets[bucket].push_back(make_pair(tlLargeKey, tlIndex));
                 }
                 else
@@ -652,7 +657,7 @@ void BatchPrimitiveProcessor::addToJoiner(ByteStream& bs)
             uint64_t nullValue = joinNullValues[joinerNum];
             bool &l_doMatchNulls = doMatchNulls[joinerNum];
             joblist::JoinType joinType = joinTypes[joinerNum];
-            vector<pair<uint64_t, uint32_t> > tmpBuckets[processorThreads];
+            utils::VLArray<vector<pair<uint64_t, uint32_t> > > tmpBuckets(processorThreads);
 
             if (joinType & MATCHNULLS)
             {
@@ -1167,7 +1172,7 @@ void BatchPrimitiveProcessor::executeTupleJoin()
                 // the null values are not sent by UM in typeless case.  null -> !found
                 tlLargeKey = makeTypelessKey(oldRow, tlLargeSideKeyColumns[j], tlKeyLengths[j],
                                              &tmpKeyAllocators[j]);
-                uint bucket = bucketPicker((char *) tlLargeKey.data, tlLargeKey.len, bpSeed) & ptMask;
+                uint bucket = tlLargeKey.hash(outputRG, tlLargeSideKeyColumns[j]) & ptMask;
                 found = tlJoiners[j][bucket]->find(tlLargeKey) != tlJoiners[j][bucket]->end();
 
                 if ((!found && !(joinTypes[j] & (LARGEOUTER | ANTI))) ||
@@ -2679,7 +2684,7 @@ inline void BatchPrimitiveProcessor::getJoinResults(const Row& r, uint32_t jInde
         TypelessData largeKey = makeTypelessKey(r, tlLargeSideKeyColumns[jIndex],
                                                 tlKeyLengths[jIndex], &tmpKeyAllocators[jIndex]);
         pair<TLJoiner::iterator, TLJoiner::iterator> range;
-        bucket = bucketPicker((char *) largeKey.data, largeKey.len, bpSeed) & ptMask;
+        bucket = largeKey.hash(outputRG, tlLargeSideKeyColumns[jIndex]) & ptMask;
         range = tlJoiners[jIndex][bucket]->equal_range(largeKey);
         for (; range.first != range.second; ++range.first)
             v.push_back(range.first->second);

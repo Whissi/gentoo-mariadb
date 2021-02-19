@@ -973,6 +973,13 @@ public:
   void set_name_no_truncate(THD *thd, const char *str, uint length,
                             CHARSET_INFO *cs);
   void init_make_send_field(Send_field *tmp_field, const Type_handler *h);
+  void share_name_with(const Item *item)
+  {
+    name= item->name;
+    common_flags= static_cast<uint8>
+     ((common_flags & ~IS_AUTO_GENERATED_NAME) |
+      (item->common_flags & IS_AUTO_GENERATED_NAME));
+  }
   virtual void cleanup();
   virtual void make_send_field(THD *thd, Send_field *field);
 
@@ -5573,14 +5580,17 @@ public:
     return Item_ref::fix_fields(thd, it);
   }
   void save_val(Field *to);
+  /* Below we should have all val() methods as in Item_ref */
   double val_real();
   longlong val_int();
-  String *val_str(String* tmp);
-  bool val_native(THD *thd, Native *to);
   my_decimal *val_decimal(my_decimal *);
   bool val_bool();
+  String *val_str(String* tmp);
+  bool val_native(THD *thd, Native *to);
   bool is_null();
   bool get_date(THD *thd, MYSQL_TIME *ltime, date_mode_t fuzzydate);
+  longlong val_datetime_packed(THD *);
+  longlong val_time_packed(THD *);
   virtual Ref_Type ref_type() { return DIRECT_REF; }
   Item *get_copy(THD *thd)
   { return get_item_copy<Item_direct_ref>(thd, this); }
@@ -5908,6 +5918,20 @@ public:
       return 1;
     }
     return Item_direct_ref::get_date(thd, ltime, fuzzydate);
+  }
+  longlong val_time_packed(THD *thd)
+  {
+    if (check_null_ref())
+      return 0;
+    else
+      return Item_direct_ref::val_time_packed(thd);
+  }
+  longlong val_datetime_packed(THD *thd)
+  {
+    if (check_null_ref())
+      return 0;
+    else
+      return Item_direct_ref::val_datetime_packed(thd);
   }
   bool send(Protocol *protocol, st_value *buffer);
   void save_org_in_field(Field *field,

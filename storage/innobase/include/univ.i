@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1994, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2013, 2020, MariaDB Corporation.
+Copyright (c) 2013, 2021, MariaDB Corporation.
 Copyright (c) 2008, Google Inc.
 
 Portions of this file contain modifications contributed and copyrighted by
@@ -404,6 +404,12 @@ in both 32-bit and 64-bit environments. */
 # define INT64PF	"%lld"
 # define UINT64scan     "llu"
 # define UINT64PFx	"%016llx"
+#elif defined _AIX
+/* Workaround for macros expension trouble */
+# define UINT32PF      "%u"
+# define INT64PF       "%lld"
+# define UINT64scan    "lu"
+# define UINT64PFx     "%016llx"
 #else
 /* Use the integer types and formatting strings defined in the C99 standard. */
 # define UINT32PF	"%" PRIu32

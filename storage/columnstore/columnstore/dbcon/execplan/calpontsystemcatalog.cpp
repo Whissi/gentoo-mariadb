@@ -411,7 +411,7 @@ void CalpontSystemCatalog::TableAliasName::serialize(messageqcpp::ByteStream& b)
     b << table;
     b << alias;
     b << view;
-    b << static_cast<const ByteStream::doublebyte>(fisColumnStore);
+    b << static_cast<ByteStream::doublebyte>(fisColumnStore);
 }
 
 void CalpontSystemCatalog::TableAliasName::unserialize(messageqcpp::ByteStream& b)
@@ -6121,10 +6121,30 @@ CalpontSystemCatalog::ColType::ColType(const ColType& rhs)
     cs = rhs.cs;
 }
 
+CalpontSystemCatalog::ColType& CalpontSystemCatalog::ColType::operator=(const ColType& rhs)
+{
+    colWidth = rhs.colWidth;
+    constraintType = rhs.constraintType;
+    colDataType = rhs.colDataType;
+    ddn = rhs.ddn;
+    defaultValue = rhs.defaultValue;
+    colPosition = rhs.colPosition;
+    scale = rhs.scale;
+    precision = rhs.precision;
+    compressionType = rhs.compressionType;
+    columnOID = rhs.columnOID;
+    autoincrement = rhs.autoincrement;
+    nextvalue = rhs.nextvalue;
+    charsetNumber = rhs.charsetNumber;
+    cs = rhs.cs;
+
+    return *this;
+}
+
 CHARSET_INFO* CalpontSystemCatalog::ColType::getCharset()
 {
     if (!cs)
-        cs= get_charset(charsetNumber, MYF(MY_WME));
+        cs= & datatypes::Charset(charsetNumber).getCharset();
     return cs;
 }
 

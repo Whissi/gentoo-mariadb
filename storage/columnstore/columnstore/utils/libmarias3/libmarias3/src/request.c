@@ -466,9 +466,15 @@ static uint8_t build_request_headers(CURL *curl, struct curl_slist **head,
 
   if (source_bucket)
   {
+    char *bucket_escape;
+    char *key_escape;
+    bucket_escape = curl_easy_escape(curl, source_bucket, (int)strlen(source_bucket));
+    key_escape = curl_easy_escape(curl, source_key, (int)strlen(source_key));
     snprintf(headerbuf, sizeof(headerbuf), "x-amz-copy-source:/%s/%s",
-             source_bucket, source_key);
+             bucket_escape, key_escape);
     headers = curl_slist_append(headers, headerbuf);
+    ms3_cfree(bucket_escape);
+    ms3_cfree(key_escape);
   }
 
   // Date/time header
@@ -784,6 +790,7 @@ uint8_t execute_request(ms3_st *ms3, command_t cmd, const char *bucket,
       method = MS3_GET;
       break;
 
+    case MS3_CMD_ASSUME_ROLE:
     default:
       ms3debug("Bad cmd detected");
       ms3_cfree(mem.data);
@@ -944,6 +951,8 @@ uint8_t execute_request(ms3_st *ms3, command_t cmd, const char *bucket,
       break;
     }
 
+    case MS3_CMD_LIST_ROLE:
+    case MS3_CMD_ASSUME_ROLE:
     default:
     {
       ms3_cfree(mem.data);

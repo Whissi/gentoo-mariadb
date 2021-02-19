@@ -48,10 +48,7 @@
 #undef min
 #undef max
 
-// Because including my_sys.h in a Columnstore header causes too many conflicts
-struct charset_info_st;
-typedef const struct charset_info_st CHARSET_INFO;
-
+#include "collation.h"
 
 #ifdef _MSC_VER
 #define __attribute__(x)
@@ -301,6 +298,7 @@ public:
         const CHARSET_INFO* cs;
 
         ColType(const ColType& rhs);
+        ColType& operator=(const ColType& rhs);
 
         CHARSET_INFO* getCharset();
         // for F&E use. only serialize necessary info for now
@@ -1109,6 +1107,7 @@ inline bool isNull(int64_t val, const execplan::CalpontSystemCatalog::ColType& c
                     break;
                 }
             }
+            break;
         }
 
         case execplan::CalpontSystemCatalog::DOUBLE:

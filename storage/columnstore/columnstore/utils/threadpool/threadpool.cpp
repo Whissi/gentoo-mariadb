@@ -87,14 +87,15 @@ void ThreadPool::setQueueSize(size_t queueSize)
 
 void ThreadPool::pruneThread()
 {
-    boost::mutex::scoped_lock lock2(fPruneMutex);
+    boost::unique_lock<boost::mutex> lock2(fPruneMutex);
 
     while(true)
-   {
-        boost::system_time timeout = boost::get_system_time() + boost::posix_time::minutes(1);
+    {
+
         if (fStop)
             return;
-        if (!fPruneThreadEnd.timed_wait(fPruneMutex, timeout))
+        if (fPruneThreadEnd.wait_for(lock2, boost::chrono::minutes{1}) ==
+            boost::cv_status::timeout)
         {
             while(!fPruneThreads.empty())
             {
@@ -130,6 +131,8 @@ void ThreadPool::setMaxThreads(size_t maxThreads)
 void ThreadPool::stop()
 {
     boost::mutex::scoped_lock lock1(fMutex);
+    if (fStop)
+      return; // Was stopped earlier
     fStop = true;
     lock1.unlock();
 
@@ -325,8 +328,7 @@ void ThreadPool::beginThread() throw()
     utils::setThreadName("Idle");
     try
     {
-        boost::mutex::scoped_lock lock1(fMutex);
-        boost::system_time timeout = boost::get_system_time() + boost::posix_time::minutes(10);
+        boost::unique_lock<boost::mutex> lock1(fMutex);
 
         for (;;)
         {
@@ -345,7 +347,8 @@ void ThreadPool::beginThread() throw()
                 else
                 {
                     // Wait no more than 10 minutes
-                    if (!fNeedThread.timed_wait(lock1, timeout)) // false means it timed out
+                    if (fNeedThread.wait_for(lock1, boost::chrono::minutes{10}) ==
+                        boost::cv_status::timeout)
                     {
                         if (fThreadCount > fMaxThreads)
                         {
@@ -354,8 +357,6 @@ void ThreadPool::beginThread() throw()
                             --fThreadCount;
                             return;
                         }
-
-                        timeout = boost::get_system_time() + boost::posix_time::minutes(10);
                     }
                 }
             }
@@ -388,7 +389,7 @@ void ThreadPool::beginThread() throw()
 
                     lock1.unlock();
 
-					utils::setThreadName("Unspecified");		
+					utils::setThreadName("Unspecified");
                     try
                     {
                         todo->functor();
@@ -432,8 +433,6 @@ void ThreadPool::beginThread() throw()
                         ml.logWarningMessage( message );
                     }
                 }
-
-                timeout = boost::get_system_time() + boost::posix_time::minutes(10);
                 fThreadAvailable.notify_all();
             }
         }

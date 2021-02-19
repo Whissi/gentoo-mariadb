@@ -2,7 +2,7 @@
 
 Copyright (c) 1994, 2016, Oracle and/or its affiliates. All Rights Reserved.
 Copyright (c) 2012, Facebook Inc.
-Copyright (c) 2014, 2020, MariaDB Corporation.
+Copyright (c) 2014, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -725,9 +725,11 @@ void btr_page_free(dict_index_t* index, buf_block_t* block, mtr_t* mtr,
 	fseg_header_t* seg_header = &root[blob || page_is_leaf(block->frame)
 					  ? PAGE_HEADER + PAGE_BTR_SEG_LEAF
 					  : PAGE_HEADER + PAGE_BTR_SEG_TOP];
-	fseg_free_page(seg_header,
-		       index->table->space, id.page_no(), mtr);
-	buf_page_free(id, mtr, __FILE__, __LINE__);
+	fil_space_t* space= index->table->space;
+	const uint32_t page= id.page_no();
+
+	fseg_free_page(seg_header, space, page, mtr);
+	buf_page_free(space, page, mtr, __FILE__, __LINE__);
 
 	/* The page was marked free in the allocation bitmap, but it
 	should remain exclusively latched until mtr_t::commit() or until it
@@ -3868,12 +3870,13 @@ btr_discard_only_page_on_level(
 	mtr_t*		mtr)	/*!< in: mtr */
 {
 	ulint		page_level = 0;
-	trx_id_t	max_trx_id;
 
 	ut_ad(!index->is_dummy);
 
 	/* Save the PAGE_MAX_TRX_ID from the leaf page. */
-	max_trx_id = page_get_max_trx_id(buf_block_get_frame(block));
+	const trx_id_t max_trx_id = page_get_max_trx_id(block->frame);
+	const rec_t* r = page_rec_get_next(page_get_infimum_rec(block->frame));
+	ut_ad(rec_is_metadata(r, *index) == index->is_instant());
 
 	while (block->page.id().page_no() != dict_index_get_page(index)) {
 		btr_cur_t	cursor;
@@ -3929,9 +3932,6 @@ btr_discard_only_page_on_level(
 	rec_offs* offsets = NULL;
 
 	if (index->table->instant || index->must_avoid_clear_instant_add()) {
-		const rec_t* r = page_rec_get_next(page_get_infimum_rec(
-							   block->frame));
-		ut_ad(rec_is_metadata(r, *index) == index->is_instant());
 		if (!rec_is_metadata(r, *index)) {
 		} else if (!index->table->instant
 			   || rec_is_alter_metadata(r, *index)) {

@@ -2,10 +2,43 @@
 #include <string.h>
 #include <stdint.h>
 
-#if defined(__GNUC__) && defined(HAVE_ARMV8_CRC)
+#if defined(HAVE_ARMV8_CRC)
 
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+
+static int pmull_supported;
+
+int crc32_aarch64_available(void)
+{
+  int ret;
+  size_t len = sizeof(ret);
+  if (sysctlbyname("hw.optional.armv8_crc32", &ret, &len, NULL, 0) == -1)
+    return 0;
+  return ret;
+}
+
+const char *crc32c_aarch64_available(void)
+{
+  if (crc32_aarch64_available() == 0)
+    return NULL;
+  pmull_supported = 1;
+  return "Using ARMv8 crc32 + pmull instructions";
+}
+
+#else
 #include <sys/auxv.h>
-#include <asm/hwcap.h>
+#if defined(__FreeBSD__)
+static unsigned long getauxval(unsigned int key)
+{
+  unsigned long val;
+  if (elf_aux_info(key, (void *)&val, (int)sizeof(val) != 0)
+    return 0ul;
+  return val;
+}
+#else
+# include <asm/hwcap.h>
+#endif
 
 #ifndef HWCAP_CRC32
 # define HWCAP_CRC32 (1 << 7)
@@ -40,7 +73,8 @@ const char *crc32c_aarch64_available(void)
     return "Using ARMv8 crc32 instructions";
 }
 
-#endif /* __GNUC__ && HAVE_ARMV8_CRC */
+#endif /* __APPLE__ */
+#endif /* HAVE_ARMV8_CRC */
 
 #ifndef HAVE_ARMV8_CRC_CRYPTO_INTRINSICS
 

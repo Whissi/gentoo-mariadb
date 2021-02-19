@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1995, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2017, 2020, MariaDB Corporation.
+Copyright (c) 2017, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -404,14 +404,17 @@ xdes_get_descriptor_const(
 	page_no_t		offset,
 	mtr_t*			mtr)
 {
-	ut_ad(mtr->memo_contains(space->latch, MTR_MEMO_S_LOCK));
+	ut_ad(mtr->memo_contains(space->latch, MTR_MEMO_SX_LOCK));
 	ut_ad(offset < space->free_limit);
 	ut_ad(offset < space->size_in_header);
 
 	const ulint zip_size = space->zip_size();
 
-	if (buf_block_t* block = buf_page_get(page_id_t(space->id, page),
-					      zip_size, RW_S_LATCH, mtr)) {
+	if (buf_block_t* block = buf_page_get_gen(page_id_t(space->id, page),
+						  zip_size, RW_S_LATCH,
+						  nullptr,
+						  BUF_GET_POSSIBLY_FREED,
+						  __FILE__, __LINE__, mtr)) {
 		buf_block_dbg_add_level(block, SYNC_FSP_PAGE);
 
 		ut_ad(page != 0 || space->free_limit == mach_read_from_4(
@@ -2569,7 +2572,7 @@ fseg_page_is_free(fil_space_t* space, unsigned page)
 							  page);
 
 	mtr.start();
-	mtr_s_lock_space(space, &mtr);
+	mtr_sx_lock_space(space, &mtr);
 
 	if (page >= space->free_limit || page >= space->size_in_header) {
 		is_free = true;
@@ -2635,11 +2638,10 @@ fseg_free_extent(
 
 	fsp_free_extent(space, page, mtr);
 
-	for (ulint i = 0; i < FSP_EXTENT_SIZE; i++) {
+	for (uint32_t i = 0; i < FSP_EXTENT_SIZE; i++) {
 		if (!xdes_is_free(descr, i)) {
-			buf_page_free(
-			  page_id_t(space->id, first_page_in_extent + 1),
-			  mtr, __FILE__, __LINE__);
+			buf_page_free(space, first_page_in_extent + i, mtr,
+				      __FILE__, __LINE__);
 		}
 	}
 }
@@ -2706,10 +2708,11 @@ fseg_free_step(
 		DBUG_RETURN(true);
 	}
 
-	fseg_free_page_low(
-		inode, iblock, space,
-		fseg_get_nth_frag_page_no(inode, n),
-		mtr);
+	page_no_t page_no = fseg_get_nth_frag_page_no(inode, n);
+
+	fseg_free_page_low(inode, iblock, space, page_no, mtr);
+
+	buf_page_free(space, page_no, mtr, __FILE__, __LINE__);
 
 	n = fseg_find_last_used_frag_page_slot(inode);
 
@@ -2771,6 +2774,7 @@ fseg_free_step_not_header(
 	}
 
 	fseg_free_page_low(inode, iblock, space, page_no, mtr);
+	buf_page_free(space, page_no, mtr, __FILE__, __LINE__);
 	return false;
 }
 

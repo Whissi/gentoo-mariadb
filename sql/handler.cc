@@ -913,6 +913,7 @@ static my_bool kill_handlerton(THD *thd, plugin_ref plugin,
 {
   handlerton *hton= plugin_hton(plugin);
 
+  mysql_mutex_assert_owner(&thd->LOCK_thd_data);
   if (hton->kill_query && thd_get_ha_data(thd, hton))
     hton->kill_query(hton, thd, *(enum thd_kill_levels *) level);
   return FALSE;
@@ -3514,7 +3515,6 @@ int handler::update_auto_increment()
   THD *thd= table->in_use;
   struct system_variables *variables= &thd->variables;
   int result=0, tmp;
-  enum enum_check_fields save_count_cuted_fields;
   DBUG_ENTER("handler::update_auto_increment");
 
   /*
@@ -3527,6 +3527,13 @@ int handler::update_auto_increment()
       (table->auto_increment_field_not_null &&
        thd->variables.sql_mode & MODE_NO_AUTO_VALUE_ON_ZERO))
   {
+
+    /*
+      There could be an error reported because value was truncated
+      when strict mode is enabled.
+    */
+    if (thd->is_error())
+      DBUG_RETURN(HA_ERR_AUTOINC_ERANGE);
     /*
       Update next_insert_id if we had already generated a value in this
       statement (case of INSERT VALUES(null),(3763),(null):
@@ -3656,10 +3663,10 @@ int handler::update_auto_increment()
                      nr, append ? nb_reserved_values : 0));
 
   /* Store field without warning (Warning will be printed by insert) */
-  save_count_cuted_fields= thd->count_cuted_fields;
-  thd->count_cuted_fields= CHECK_FIELD_IGNORE;
-  tmp= table->next_number_field->store((longlong)nr, TRUE);
-  thd->count_cuted_fields= save_count_cuted_fields;
+  {
+    Check_level_instant_set check_level_save(thd, CHECK_FIELD_IGNORE);
+    tmp= table->next_number_field->store((longlong)nr, TRUE);
+  }
 
   if (unlikely(tmp))                            // Out of range value in store
   {
@@ -5021,6 +5028,8 @@ static my_bool delete_table_force(THD *thd, plugin_ref plugin, void *arg)
       param->error= error;
     if (error == 0)
     {
+      if (hton && hton->flags & HTON_TABLE_MAY_NOT_EXIST_ON_SLAVE)
+        thd->replication_flags |= OPTION_IF_EXISTS;
       param->error= 0;
       return TRUE;                                // Table was deleted
     }
@@ -5507,6 +5516,7 @@ int ha_create_table(THD *thd, const char *path,
   char name_buff[FN_REFLEN];
   const char *name;
   TABLE_SHARE share;
+  Abort_on_warning_instant_set old_abort_on_warning(thd, 0);
   bool temp_table __attribute__((unused)) =
     create_info->options & (HA_LEX_CREATE_TMP_TABLE | HA_CREATE_TMP_ALTER);
   DBUG_ENTER("ha_create_table");
@@ -6947,7 +6957,7 @@ int handler::ha_check_overlaps(const uchar *old_data, const uchar* new_data)
   uchar *record_buffer= lookup_buffer + table_share->max_unique_length
                                       + table_share->null_fields;
 
-  // Needs to compare record refs later is old_row_found()
+  // Needed to compare record refs later
   if (is_update)
     position(old_data);
 
@@ -7003,12 +7013,8 @@ int handler::ha_check_overlaps(const uchar *old_data, const uchar* new_data)
       /* In case of update it could happen that the nearest neighbour is
          a record we are updating. It means, that there are no overlaps
          from this side.
-
-         An assumption is made that during update we always have the last
-         fetched row in old_data. Therefore, comparing ref's is enough
       */
       DBUG_ASSERT(lookup_handler != this);
-      DBUG_ASSERT(inited != NONE);
       DBUG_ASSERT(ref_length == lookup_handler->ref_length);
 
       lookup_handler->position(record_buffer);
@@ -7133,16 +7139,17 @@ int handler::ha_write_row(const uchar *buf)
   if ((error= ha_check_overlaps(NULL, buf)))
     DBUG_RETURN(error);
 
-  MYSQL_INSERT_ROW_START(table_share->db.str, table_share->table_name.str);
-  mark_trx_read_write();
-  increment_statistics(&SSV::ha_write_count);
-
   if (table->s->long_unique_table && this == table->file)
   {
     DBUG_ASSERT(inited == NONE || lookup_handler != this);
     if ((error= check_duplicate_long_entries(buf)))
       DBUG_RETURN(error);
   }
+
+  MYSQL_INSERT_ROW_START(table_share->db.str, table_share->table_name.str);
+  mark_trx_read_write();
+  increment_statistics(&SSV::ha_write_count);
+
   TABLE_IO_WAIT(tracker, PSI_TABLE_WRITE_ROW, MAX_KEY, error,
                       { error= write_row(buf); })
 
@@ -7182,17 +7189,19 @@ int handler::ha_update_row(const uchar *old_data, const uchar *new_data)
   DBUG_ASSERT(new_data == table->record[0]);
   DBUG_ASSERT(old_data == table->record[1]);
 
-  if ((error= ha_check_overlaps(old_data, new_data)))
+  uint saved_status= table->status;
+  error= ha_check_overlaps(old_data, new_data);
+
+  if (!error && table->s->long_unique_table && this == table->file)
+    error= check_duplicate_long_entries_update(new_data);
+  table->status= saved_status;
+
+  if (error)
     return error;
 
   MYSQL_UPDATE_ROW_START(table_share->db.str, table_share->table_name.str);
   mark_trx_read_write();
   increment_statistics(&SSV::ha_update_count);
-  if (table->s->long_unique_table && this == table->file &&
-      (error= check_duplicate_long_entries_update(new_data)))
-  {
-    return error;
-  }
 
   TABLE_IO_WAIT(tracker, PSI_TABLE_UPDATE_ROW, active_index, 0,
                       { error= update_row(old_data, new_data);})

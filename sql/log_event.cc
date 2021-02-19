@@ -1,6 +1,6 @@
 /*
    Copyright (c) 2000, 2018, Oracle and/or its affiliates.
-   Copyright (c) 2009, 2020, MariaDB
+   Copyright (c) 2009, 2021, MariaDB
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -42,7 +42,6 @@
 #include <mysql/psi/mysql_statement.h>
 #include <strfunc.h>
 #include "compat56.h"
-#include "wsrep_mysqld.h"
 #include "sql_insert.h"
 #else
 #include "mysqld_error.h"
@@ -56,7 +55,9 @@
 
 #define my_b_write_string(A, B) my_b_write((A), (uchar*)(B), (uint) (sizeof(B) - 1))
 
+#ifndef _AIX
 PSI_memory_key key_memory_log_event;
+#endif
 PSI_memory_key key_memory_Incident_log_event_message;
 PSI_memory_key key_memory_Rows_query_log_event_rows_query;
 
@@ -3407,7 +3408,6 @@ int Rows_log_event::get_data_size()
                   return (int)(6 + no_bytes_in_map(&m_cols) + (end - buf) +
                   (general_type_code == UPDATE_ROWS_EVENT ? no_bytes_in_map(&m_cols_ai) : 0) +
                   m_rows_cur - m_rows_buf););
-
   int data_size= 0;
   Log_event_type type = get_type_code();
   bool is_v2_event= LOG_EVENT_IS_ROW_V2(type);

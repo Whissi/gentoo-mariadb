@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 1996, 2016, Oracle and/or its affiliates. All Rights Reserved.
-Copyright (c) 2015, 2020, MariaDB Corporation.
+Copyright (c) 2015, 2021, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -158,6 +158,10 @@ trx_init(
 	trx->lock.rec_cached = 0;
 
 	trx->lock.table_cached = 0;
+#ifdef WITH_WSREP
+	ut_ad(!trx->wsrep);
+	ut_ad(!trx->wsrep_UK_scan);
+#endif /* WITH_WSREP */
 }
 
 /** For managing the life-cycle of the trx_t instance that we get
@@ -366,6 +370,10 @@ trx_t *trx_create()
 	ut_ad(trx->lock.rec_cached == 0);
 	ut_ad(UT_LIST_GET_LEN(trx->lock.evicted_tables) == 0);
 
+#ifdef WITH_WSREP
+	ut_ad(!trx->wsrep_UK_scan);
+#endif /* WITH_WSREP */
+
 	trx_sys.register_trx(trx);
 
 	return(trx);
@@ -407,9 +415,11 @@ void trx_t::free()
   MEM_NOACCESS(&n_ref, sizeof n_ref);
   /* do not poison mutex */
   MEM_NOACCESS(&id, sizeof id);
-  /* state is accessed by innobase_kill_connection() */
+  MEM_NOACCESS(&state, sizeof state);
   MEM_NOACCESS(&is_recovered, sizeof is_recovered);
-  /* wsrep is accessed by innobase_kill_connection() */
+#ifdef WITH_WSREP
+  MEM_NOACCESS(&wsrep, sizeof wsrep);
+#endif
   read_view.mem_noaccess();
   MEM_NOACCESS(&lock, sizeof lock);
   MEM_NOACCESS(&op_info, sizeof op_info);
@@ -427,7 +437,7 @@ void trx_t::free()
   MEM_NOACCESS(&start_time_micro, sizeof start_time_micro);
   MEM_NOACCESS(&commit_lsn, sizeof commit_lsn);
   MEM_NOACCESS(&table_id, sizeof table_id);
-  /* mysql_thd is accessed by innobase_kill_connection() */
+  MEM_NOACCESS(&mysql_thd, sizeof mysql_thd);
   MEM_NOACCESS(&mysql_log_file_name, sizeof mysql_log_file_name);
   MEM_NOACCESS(&mysql_log_offset, sizeof mysql_log_offset);
   MEM_NOACCESS(&n_mysql_tables_in_use, sizeof n_mysql_tables_in_use);
@@ -460,10 +470,10 @@ void trx_t::free()
   MEM_NOACCESS(&xid, sizeof xid);
   MEM_NOACCESS(&mod_tables, sizeof mod_tables);
   MEM_NOACCESS(&detailed_error, sizeof detailed_error);
-  MEM_NOACCESS(&n_rec_lock_waits, sizeof n_rec_lock_waits);
-  MEM_NOACCESS(&n_table_lock_waits, sizeof n_table_lock_waits);
-  MEM_NOACCESS(&total_rec_lock_wait_time, sizeof total_rec_lock_wait_time);
-  MEM_NOACCESS(&total_table_lock_wait_time, sizeof total_table_lock_wait_time);
+#ifdef WITH_WSREP
+  ut_ad(!wsrep_UK_scan);
+  MEM_NOACCESS(&wsrep_UK_scan, sizeof wsrep_UK_scan);
+#endif /* WITH_WSREP */
   MEM_NOACCESS(&magic_n, sizeof magic_n);
   trx_pools->mem_free(this);
 }

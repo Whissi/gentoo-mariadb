@@ -96,13 +96,22 @@ struct log_phys_t : public log_rec_t
   /** start LSN of the mini-transaction (not necessarily of this record) */
   const lsn_t start_lsn;
 private:
-  /** length  of the record, in bytes */
-  uint16_t len;
+  /** @return the start of length and data */
+  const byte *start() const
+  {
+    return my_assume_aligned<sizeof(size_t)>
+      (reinterpret_cast<const byte*>(&start_lsn + 1));
+  }
+  /** @return the start of length and data */
+  byte *start()
+  { return const_cast<byte*>(const_cast<const log_phys_t*>(this)->start()); }
+  /** @return the length of the following record */
+  uint16_t len() const { uint16_t i; memcpy(&i, start(), 2); return i; }
 
   /** @return start of the log records */
-  byte *begin() { return reinterpret_cast<byte*>(&len + 1); }
+  byte *begin() { return start() + 2; }
   /** @return end of the log records */
-  byte *end() { byte *e= begin() + len; ut_ad(!*e); return e; }
+  byte *end() { byte *e= begin() + len(); ut_ad(!*e); return e; }
 public:
   /** @return start of the log records */
   const byte *begin() const { return const_cast<log_phys_t*>(this)->begin(); }
@@ -112,11 +121,7 @@ public:
   /** Determine the allocated size of the object.
   @param len  length of recs, excluding terminating NUL byte
   @return the total allocation size */
-  static size_t alloc_size(size_t len)
-  {
-    return len + 1 +
-      reinterpret_cast<size_t>(reinterpret_cast<log_phys_t*>(0)->begin());
-  }
+  static inline size_t alloc_size(size_t len);
 
   /** Constructor.
   @param start_lsn start LSN of the mini-transaction
@@ -124,11 +129,13 @@ public:
   @param recs the first log record for the page in the mini-transaction
   @param size length of recs, in bytes, excluding terminating NUL byte */
   log_phys_t(lsn_t start_lsn, lsn_t lsn, const byte *recs, size_t size) :
-    log_rec_t(lsn), start_lsn(start_lsn), len(static_cast<uint16_t>(size))
+    log_rec_t(lsn), start_lsn(start_lsn)
   {
     ut_ad(start_lsn);
     ut_ad(start_lsn < lsn);
+    const uint16_t len= static_cast<uint16_t>(size);
     ut_ad(len == size);
+    memcpy(start(), &len, 2);
     reinterpret_cast<byte*>(memcpy(begin(), recs, size))[size]= 0;
   }
 
@@ -138,8 +145,10 @@ public:
   void append(const byte *recs, size_t size)
   {
     ut_ad(start_lsn < lsn);
+    uint16_t l= len();
     reinterpret_cast<byte*>(memcpy(end(), recs, size))[size]= 0;
-    len= static_cast<uint16_t>(len + size);
+    l= static_cast<uint16_t>(l + size);
+    memcpy(start(), &l, 2);
   }
 
   /** Apply an UNDO_APPEND record.
@@ -512,6 +521,12 @@ page_corrupted:
     }
   }
 };
+
+
+inline size_t log_phys_t::alloc_size(size_t len)
+{
+  return len + (1 + 2 + sizeof(log_phys_t));
+}
 
 
 /** Tablespace item during recovery */
@@ -2253,12 +2268,13 @@ static void recv_recover_page(buf_block_t* block, mtr_t& mtr,
 	ut_d(lsn_t recv_start_lsn = 0);
 	const lsn_t init_lsn = init ? init->lsn : 0;
 
+	bool skipped_after_init = false;
+
 	for (const log_rec_t* recv : p->second.log) {
 		const log_phys_t* l = static_cast<const log_phys_t*>(recv);
 		ut_ad(l->lsn);
 		ut_ad(end_lsn <= l->lsn);
-		end_lsn = l->lsn;
-		ut_ad(end_lsn <= log_sys.log.scanned_lsn);
+		ut_ad(l->lsn <= log_sys.log.scanned_lsn);
 
 		ut_ad(l->start_lsn);
 		ut_ad(recv_start_lsn <= l->start_lsn);
@@ -2271,6 +2287,8 @@ static void recv_recover_page(buf_block_t* block, mtr_t& mtr,
 					      block->page.id().space(),
 					      block->page.id().page_no(),
 					      l->start_lsn, page_lsn));
+			skipped_after_init = true;
+			end_lsn = l->lsn;
 			continue;
 		}
 
@@ -2280,9 +2298,24 @@ static void recv_recover_page(buf_block_t* block, mtr_t& mtr,
 					      block->page.id().space(),
 					      block->page.id().page_no(),
 					      l->start_lsn, init_lsn));
+			skipped_after_init = false;
+			end_lsn = l->lsn;
 			continue;
 		}
 
+		/* There is no need to check LSN for just initialized pages. */
+		if (skipped_after_init) {
+			skipped_after_init = false;
+			ut_ad(end_lsn == page_lsn);
+			if (end_lsn != page_lsn)
+				ib::warn()
+					<< "The last skipped log record LSN "
+					<< end_lsn
+					<< " is not equal to page LSN "
+					<< page_lsn;
+		}
+
+		end_lsn = l->lsn;
 
 		if (UNIV_UNLIKELY(srv_print_verbose_log == 2)) {
 			ib::info() << "apply " << l->start_lsn
@@ -2683,7 +2716,7 @@ next_page:
     buf_pool.free_block(free_block);
 
     /* Wait until all the pages have been processed */
-    while (!pages.empty())
+    while (!pages.empty() || buf_pool.n_pend_reads)
     {
       const bool abort= found_corrupt_log || found_corrupt_fs;
 
@@ -3572,6 +3605,7 @@ completed:
 	mutex_enter(&recv_sys.mutex);
 
 	recv_sys.apply_log_recs = true;
+	recv_no_ibuf_operations = false;
 
 	mutex_exit(&recv_sys.mutex);
 
